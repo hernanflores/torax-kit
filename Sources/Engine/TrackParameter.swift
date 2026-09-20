@@ -1,0 +1,493 @@
+/// Todo lo que se puede ajustar en un Track.
+///
+/// **Vive en `Engine` y no en la capa de entrada** porque nombra conceptos del
+/// dominio, no del transporte: *qué* se puede ajustar es una propiedad del
+/// motor; *por dónde* llega la orden —un knob, un mensaje MIDI, un test— es
+/// otra cosa, y cambiará más veces que esta lista.
+///
+/// **Se llamaba `ShapeParameter` y solo nombraba cuatro.** Con Groove entero
+/// son nueve. El nombre viejo obligaba a que la
+/// pantalla y el mapeo de CC supieran a qué familia pertenece cada parámetro
+/// para poder moverlo, que es un acoplamiento sin ninguna razón de dominio
+/// detrás: quien gira un knob quiere mover *ese* parámetro, no consultar su
+/// linaje.
+///
+/// El orden es el de las familias en el flujo del motor —Shape decide *cuándo*,
+/// Groove *cómo se interpreta*— y es el que ve la pantalla.
+///
+/// Lo que falta: el pool de Pitch no está aquí porque no se ajusta con un delta
+/// sino con pads, que es otra superficie.
+public enum TrackParameter: Hashable, Sendable, CaseIterable {
+
+    // Shape — cuándo y con qué densidad ocurren los eventos.
+    case steps
+    case pulses
+    case rotate
+    case division
+
+    // Shape, una capa por encima — cuántos triggers extra cuelgan de cada Pulse.
+    //
+    // **Son de Shape y no de una familia nueva.** La tabla de Shape de la Pre
+    // Spec ya pone Repeats y Time ahí, y un cuarto acento exigiría verificar un
+    // cuarto color a un metro sin una familia nueva detrás.
+    case repeats
+
+    /// El usuario lee `Time`. El prefijo es desambiguación de Swift frente a
+    /// `MusicalTime` y `MusicalTimeline`, no un término nuevo (NFR7).
+    case repeatTime
+    case ramp
+    case pace
+
+    // Groove — cómo se interpreta lo que ocurre.
+    case velocity
+    case sustain
+    case probability
+
+    // Groove, en el tiempo — cuándo ocurre respecto a la rejilla.
+    case timing
+    case delay
+
+    // Tonal — qué alturas suenan del pool.
+    //
+    // **El primer parámetro de knob de la familia** (`pitch-harmony_20260912`).
+    // Transpone el pool entero en grados de la escala; el pool base lo siguen
+    // editando los pads.
+    case pitch
+
+    // **Mueve un pitch del pool por clic**, en round robin y con histéresis.
+    // No tiene posición absoluta: es estado, no un número (ver `Harmony`).
+    case harmony
+}
+
+/// A qué familia funcional pertenece un parámetro.
+///
+/// **Existe porque el color lo necesita, pero no es color.**
+/// `product-guidelines.md` da un acento cromático a cada familia y dice que «el
+/// color codifica *qué tipo de parámetro es*; nunca es decorativo». Qué tipo es
+/// lo sabe el motor; qué color le toca lo decide la vista. Poner el `switch`
+/// allí lo dejaría donde no hay tests, que es lo que `workflow.md` prohíbe.
+///
+/// **No todas las familias son alcanzables desde un `TrackParameter`.** Tonal
+/// no lo es: Scale y Root son táctiles y el pool se edita con pads, así que
+/// ninguno de los tres se ajusta con un delta. Está aquí de todas formas porque
+/// esta lista clasifica *familias*, no parámetros, y el tercer tab de la
+/// pantalla necesita su acento por la misma vía que los otros dos.
+public enum ParameterFamily: Equatable, Sendable, CaseIterable {
+
+    /// Cuándo y con qué densidad ocurren los eventos.
+    case shape
+
+    /// Cómo se interpreta lo que ocurre.
+    case groove
+
+    /// De qué material salen las alturas: Scale, Root y el pool.
+    ///
+    /// **Es una clasificación, no un parámetro.** Ningún `TrackParameter` cae
+    /// aquí y `ParameterFamilyTests` lo fija. Existe para que el tab TONAL saque
+    /// su color de `accent(for:)` como los otros dos, en vez de que la vista
+    /// resuelva ese caso con un condicional propio — que lo dejaría donde no hay
+    /// tests, exactamente lo que esta clasificación existe para evitar.
+    case tonal
+
+    /// El nombre de la familia, en el vocabulario de la Pre Spec y sin traducir
+    /// (`product-guidelines.md`, NFR7).
+    ///
+    /// **Vive aquí desde el 2026-09-06.** Se escribía en un `switch` dentro de
+    /// `ParameterFamilyCard`, y el card tonal repetía el suyo como literal. Es la
+    /// misma clase de texto que `Scale.name`: dominio, no presentación, y se
+    /// rompe en silencio — una familia mal nombrada se sigue dibujando.
+    ///
+    /// **Capitalizado, como el resto del vocabulario.** Que la interfaz lo pinte
+    /// en minúsculas es cosa de la capa de presentación.
+    public var name: String {
+        switch self {
+        case .shape: "Shape"
+        case .groove: "Groove"
+        case .tonal: "Tonal"
+        }
+    }
+}
+
+extension TrackParameter {
+
+    /// La familia a la que pertenece.
+    public var family: ParameterFamily {
+        switch self {
+        case .steps, .pulses, .rotate, .division: .shape
+        case .repeats, .repeatTime, .ramp, .pace: .shape
+        case .velocity, .sustain, .probability, .timing, .delay: .groove
+        case .pitch, .harmony: .tonal
+        }
+    }
+}
+
+extension TrackParameter {
+
+    /// Si este parámetro es del Note Repeater.
+    ///
+    /// **Es dato de dominio y no de presentación.** Los cuatro están en la
+    /// familia Shape y aun así no son el ritmo: son una capa sobre él, y esa
+    /// diferencia es la que el card de Shape dibuja partiendo su lista en dos
+    /// líneas (FR15). Que la vista deduzca cuáles son con una lista escrita a
+    /// mano sería poner una decisión del modelo donde no hay tests.
+    public var isNoteRepeater: Bool {
+        switch self {
+        case .repeats, .repeatTime, .ramp, .pace: true
+        case .steps, .pulses, .rotate, .division: false
+        case .velocity, .sustain, .probability, .timing, .delay: false
+        case .pitch, .harmony: false
+        }
+    }
+}
+
+extension TrackParameter {
+
+    /// Si el LFO puede apuntar a este parámetro (`assignable-lfo_20260916`, FR2).
+    ///
+    /// **Los nueve que entran comparten una propiedad: se deciden en cada
+    /// evento y no definen la vuelta.** Por eso el LFO cabe sobre ellos sin
+    /// construir nada en el hilo del scheduler.
+    ///
+    /// **Es dato de dominio y no de presentación**, como `isNoteRepeater`. Qué
+    /// se puede modular es una propiedad del motor; que la rejilla 3×3 de la
+    /// pantalla dibuje nueve cards es una consecuencia. Una lista escrita a mano
+    /// en la vista pondría esta decisión donde no hay tests.
+    ///
+    /// **Los seis que quedan fuera, y por qué cada uno:**
+    ///
+    /// - `probability`: decisión de producto, pedida al planificar el track. No
+    ///   hay ninguna razón técnica detrás; nada impediría modularla.
+    /// - `steps`: **circular**. La fase del LFO se calcula `p = step /
+    ///   stepCount`, y `steps` *es* ese divisor.
+    /// - `division`: circular también, y además define cuánto dura un Step.
+    ///   Meterlo en el LFO metería al LFO en el camino que produce jitter, con
+    ///   la medición suspendida desde el 2026-09-02.
+    /// - `pulses` y `rotate`: no son circulares, pero redistribuir un euclidiano
+    ///   o girarlo exige **reconstruir un `Shape` por Step** —reparto de pulsos
+    ///   y asignación— en el hilo del scheduler. Es la restricción de tiempo
+    ///   real, no una decisión musical: el día que `Shape` sepa rotarse sin
+    ///   asignar, estos dos pueden entrar.
+    /// - `harmony`: **no tiene posición**. Es estado con historia —round robin
+    ///   con histéresis—, así que una onda periódica sobre él no produce un
+    ///   resultado repetible, que es la premisa de `product.md`.
+    public var isModulationTarget: Bool {
+        switch self {
+        case .velocity, .sustain, .timing, .delay: true
+        case .repeats, .repeatTime, .ramp, .pace: true
+        case .pitch: true
+        case .probability: false
+        case .steps, .pulses, .rotate, .division: false
+        case .harmony: false
+        }
+    }
+
+    /// Los nueve destinos, **en el orden que dibuja la rejilla 3×3** de la
+    /// pantalla `modulation` (FR16).
+    ///
+    /// **El orden es contrato y no un detalle del compilador**, igual que el de
+    /// `Waveform.allCases` lo es para la rejilla 2×2: se lee de izquierda a
+    /// derecha y de arriba abajo, y un test lo fija. No sale de `allCases`
+    /// filtrado porque aquel orden es el del flujo del motor —Shape decide
+    /// *cuándo*, Groove *cómo*— y éste es el de la mano sobre el cristal.
+    ///
+    /// **No lo lee el hilo del scheduler.** `Modulation.target` resuelve su
+    /// destino con un `switch`, no indexando esta lista: un global de
+    /// inicialización perezosa cuesta un `swift_once` en su primera lectura, y
+    /// ese hilo no tiene por qué pagarlo.
+    public static let modulationTargets: [TrackParameter] = [
+        .velocity, .sustain, .timing,
+        .delay, .repeats, .repeatTime,
+        .ramp, .pace, .pitch,
+    ]
+
+    /// Media excursión del rango de este parámetro: lo que desplaza un `depth`
+    /// de ±100 sobre el pico de la onda (FR6, FR7).
+    ///
+    /// ```
+    /// halfRange = (displacementRange.upper − displacementRange.lower) / 2
+    /// ```
+    ///
+    /// **Sale del rango que el propio tipo ya declara, no de una tabla nueva.**
+    /// Escribir los nueve valores a mano sería una segunda fuente de verdad, y
+    /// la segunda se olvidaría el día que un tipo cambiara de rango.
+    ///
+    /// **Sobre `velocity` da 63**, que es exactamente el número que la fórmula
+    /// de la rebanada anterior llevaba escrito: `Velocity.validRange` es 1…127 y
+    /// (127 − 1) / 2 son 63. Generalizar no cambia un solo desplazamiento del
+    /// destino ya entregado, y de eso depende la no regresión del track.
+    ///
+    /// **Los que no son destino devuelven 0**, que es lo que apaga la
+    /// modulación. Devolver un valor plausible haría sonar algo por accidente si
+    /// alguna vez se colara un destino inválido.
+    ///
+    /// Realtime: llamado desde el hilo del scheduler.
+    /// Sin asignaciones, sin locks, sin await, sin coma flotante.
+    /// > **`pitch` es la excepción, y devuelve 0 a propósito** (enmienda del
+    /// > 2026-09-16). Su `displacementRange` es ±28 grados, que es el recorrido
+    /// > del **knob de transposición** — cuatro octavas. Aplicado como
+    /// > profundidad de LFO daba saltos de hasta cuatro octavas en el pico:
+    /// > notas dentro de la escala, pero tan lejos que suenan como un error. Lo
+    /// > encontró la verificación en dispositivo.
+    /// >
+    /// > Su excursión es **una octava de la escala del Cycle**, y eso no cabe
+    /// > aquí: depende del marco tonal, que un `TrackParameter` no conoce. La
+    /// > decide `Cycle.modulationHalfRange`. Devolver 0 en vez de un número
+    /// > plausible hace que usar esta propiedad para pitch **apague** la
+    /// > modulación en lugar de aplicar una profundidad equivocada en silencio.
+    public var modulationHalfRange: Int {
+        guard isModulationTarget, self != .pitch, let range = displacementRange else { return 0 }
+        return (range.upperBound - range.lowerBound) / 2
+    }
+}
+
+extension TrackParameter: CustomStringConvertible {
+
+    /// Los términos de la Pre Spec, en inglés y sin traducir, como exige
+    /// `product-guidelines.md`.
+    /// Los extremos entre los que se mueve este parámetro, o `nil` si envuelve
+    /// en vez de acotarse.
+    ///
+    /// **Lo consume el tope del desplazamiento acumulado de Ctrl All** (FR5), y
+    /// nada más. Se expone el rango entero y no solo su ancho porque el tope se
+    /// calcula contra los **valores concretos** de los Tracks capturados: cuánto
+    /// le queda por subir al que más recorrido tiene, y cuánto por bajar al que
+    /// más. Ver `CtrlAllOffset.advancing(_:by:)`.
+    ///
+    /// **`nil` para Rotate, y no un rango vacío.** Rotate envuelve módulo el
+    /// `steps.count` de cada Cycle, así que no tiene extremos contra los que
+    /// saturar y su knob no puede quedarse muerto: la razón del tope no le
+    /// aplica.
+    ///
+    /// **Sale de los rangos que cada tipo ya declara**, no de una tabla nueva:
+    /// duplicar los extremos aquí sería tener dos sitios donde equivocarse, y el
+    /// segundo se olvidaría al cambiar el primero.
+    public var displacementRange: ClosedRange<Int>? {
+        switch self {
+        case .steps: Steps.validRange
+        case .pulses: Pulses.validRange
+        case .rotate: nil
+        case .division: 0...(Division.ordered.count - 1)
+        case .repeats: Repeats.validRange
+        // Como Division, y por lo mismo: el knob recorre una lista, así que su
+        // rango es el de posiciones y no el de fracciones.
+        case .repeatTime: 0...(RepeatTime.ordered.count - 1)
+        case .ramp: Ramp.validRange
+        case .pace: Pace.validRange
+        case .velocity: Velocity.validRange
+        case .sustain: Sustain.validRange
+        case .probability: Probability.validRange
+        case .timing: Timing.validRange
+        case .delay: Delay.validRange
+        case .pitch: PitchOffset.validRange
+        // Como Rotate, y por otra razón: Harmony no tiene extremos porque no
+        // tiene posición. Lo que frena un giro es el pool, paso a paso.
+        case .harmony: nil
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .steps: "Steps"
+        case .pulses: "Pulses"
+        case .rotate: "Rotate"
+        case .division: "Division"
+        case .repeats: "Repeats"
+        case .repeatTime: "Time"
+        case .ramp: "Ramp"
+        case .pace: "Pace"
+        case .velocity: "Velocity"
+        case .sustain: "Sustain"
+        case .probability: "Probability"
+        case .timing: "Timing"
+        case .delay: "Delay"
+        case .pitch: "Pitch"
+        case .harmony: "Harmony"
+        }
+    }
+}
+
+extension Cycle {
+
+    /// El Track resultante de desplazar uno de sus parámetros.
+    ///
+    /// **Este es el despacho que el renombrado hace posible.** Quien recibe un
+    /// giro de knob ya no tiene que saber si el parámetro es de Shape o de
+    /// Groove: lo dice el caso. Añadir Timing y Delay será añadir dos casos, no
+    /// tocar a ningún llamante.
+    ///
+    /// **Lo que no se mueve se conserva.** Ajustar un parámetro de Shape deja
+    /// intactos el Groove y el pool, y al revés. Es la regla de destructividad
+    /// de `product-guidelines.md` —«cambiar un parámetro nunca destruye
+    /// material»— aplicada a la estructura y no solo al pool tonal.
+    ///
+    /// No es código de tiempo real: construir un Shape reparte los Pulses, y eso
+    /// Applies a delta to the selected track parameter while preserving the other track values.
+    /// - Parameters:
+    ///   - delta: The amount by which to advance the parameter.
+    ///   - parameter: The track parameter to adjust.
+    /// - Returns: A new track with the selected parameter adjusted.
+    public func applying(_ delta: Int, to parameter: TrackParameter) -> Cycle {
+        switch parameter {
+        case .steps, .pulses, .rotate, .division:
+            // `with(...)` y no `Track(...)`: reconstruir enumerando campos es lo
+            // que hizo que un giro de knob perdiera el canal, el marco tonal y
+            // el registro de pads en cuanto el Track creció.
+            return with(shape: shape.applying(delta, to: parameter))
+
+        // Los cuatro del Note Repeater pasan por `NoteRepeater.with(...)`, que
+        // es el mismo idioma y por la misma razón: enumerar campos aquí perdería
+        // los otros tres en cuanto el valor creciera.
+        case .repeats:
+            return with(
+                noteRepeater: noteRepeater.with(repeats: noteRepeater.repeats.advanced(by: delta)))
+
+        case .repeatTime:
+            return with(
+                noteRepeater: noteRepeater.with(time: noteRepeater.time.advanced(by: delta)))
+
+        case .ramp:
+            return with(
+                noteRepeater: noteRepeater.with(ramp: noteRepeater.ramp.advanced(by: delta)))
+
+        case .pace:
+            return with(
+                noteRepeater: noteRepeater.with(pace: noteRepeater.pace.advanced(by: delta)))
+
+        case .velocity:
+            return withGroove(
+                Groove(
+                    velocity: groove.velocity.advanced(by: delta),
+                    sustain: groove.sustain,
+                    probability: groove.probability,
+                    timing: groove.timing,
+                    delay: groove.delay
+                ))
+
+        case .sustain:
+            return withGroove(
+                Groove(
+                    velocity: groove.velocity,
+                    sustain: groove.sustain.advanced(by: delta),
+                    probability: groove.probability,
+                    timing: groove.timing,
+                    delay: groove.delay
+                ))
+
+        case .probability:
+            return withGroove(
+                Groove(
+                    velocity: groove.velocity,
+                    sustain: groove.sustain,
+                    probability: groove.probability.advanced(by: delta),
+                    timing: groove.timing,
+                    delay: groove.delay
+                ))
+
+        case .timing:
+            return withGroove(
+                Groove(
+                    velocity: groove.velocity,
+                    sustain: groove.sustain,
+                    probability: groove.probability,
+                    timing: groove.timing.advanced(by: delta),
+                    delay: groove.delay
+                ))
+
+        case .delay:
+            return withGroove(
+                Groove(
+                    velocity: groove.velocity,
+                    sustain: groove.sustain,
+                    probability: groove.probability,
+                    timing: groove.timing,
+                    delay: groove.delay.advanced(by: delta)
+                ))
+
+        // El freno depende del pool y del marco, así que lo decide quien los
+        // conoce: `pitchOffset(movedBy:)`.
+        case .pitch:
+            return with(pitchOffset: pitchOffset(movedBy: delta))
+
+        // Cada clic es un paso, y un paso bloqueado no cambia nada.
+        case .harmony:
+            return with(harmony: harmonyMoved(by: delta))
+        }
+    }
+
+    /// Creates a track with the specified groove while preserving its shape and pool.
+    /// - Parameter groove: The replacement groove.
+    /// - Returns: A track with the specified groove.
+    private func withGroove(_ groove: Groove) -> Cycle {
+        with(groove: groove)
+    }
+}
+
+extension TrackParameter {
+
+    /// Cómo está este parámetro en un Cycle, ya escrito y con su unidad.
+    ///
+    /// **Existe porque un card en reposo no tiene dos Cycles que comparar.**
+    /// Hasta el 2026-09-06 el valor de un parámetro solo se sabía escribir como
+    /// efecto de un cambio, dentro de `ParameterChange`: el handoff de iPadOS
+    /// pide los nueve a la vez y en reposo, así que la lectura tenía que poder
+    /// hacerse sin diferencia.
+    ///
+    /// **`ParameterChange` pasa a usar esto**, así que las nueve reglas de
+    /// escritura viven en un solo sitio en vez de dos. Un test comprueba que lo
+    /// que anuncia un giro y lo que dice el card son la misma cadena: si alguna
+    /// vez se separan, es un fallo y no una variación.
+    ///
+    /// El texto no lleva el nombre del parámetro; ése lo da `description`.
+    public func value(in track: Cycle) -> String {
+        let shape = track.shape
+        let groove = track.groove
+        let repeater = track.noteRepeater
+        switch self {
+        case .steps: return "\(shape.steps.count)"
+        // **El valor pedido, no `effectivePulses`.** El knob está en este número
+        // y mostrar el otro haría creer que se perdió (enmienda del 2026-08-27).
+        case .pulses: return "\(shape.pulses.count)"
+        case .rotate: return "\(shape.rotate.amount)"
+        case .division: return "\(shape.division)"
+        case .repeats: return "\(repeater.repeats.count)"
+        // La fracción, como Division: `1/32`.
+        case .repeatTime: return "\(repeater.time)"
+        // **Con signo explícito, también el positivo.** Ramp y Pace son curvas
+        // con dos sentidos y el valor transitorio se lee solo: `+40%` dice que
+        // sube donde `40%` obligaría a recordar hacia dónde. Delay, que es el
+        // otro bipolar, se escribe sin el `+` desde antes; unificarlos toca su
+        // test y su pantalla, y es un cambio de otro track.
+        case .ramp: return signed(repeater.ramp.percent)
+        case .pace: return signed(repeater.pace.percent)
+        // Sin signo de porcentaje: Velocity vive en la unidad MIDI, y ponérselo
+        // diría que es un porcentaje de algo.
+        case .velocity: return "\(groove.velocity.value)"
+        case .sustain: return "\(groove.sustain.percent)%"
+        case .probability: return "\(groove.probability.percent)%"
+        case .timing: return "\(groove.timing.percent)%"
+        // Con signo, y por la misma razón que en `Groove.description`: es el
+        // único parámetro que puede ser negativo, y adelantar y atrasar no se
+        // distinguen por el contexto.
+        case .delay: return "\(groove.delay.percent)%"
+        // Con signo explícito, como Ramp y Pace, pero sin `%`: son grados, no un
+        // porcentaje de nada.
+        case .pitch:
+            let degrees = track.pitchOffset.degrees
+            return degrees > 0 ? "+\(degrees)" : "\(degrees)"
+        // **Lo que suena, con octava.** Harmony no tiene número con sentido: dos
+        // historias con el mismo neto suenan distinto, así que se enseña el
+        // resultado. El pool vacío se dice igual que en el resto de la app.
+        case .harmony:
+            let sounding = track.soundingPool
+            guard !sounding.isEmpty else { return sounding.countDescription }
+            return (0..<sounding.count).compactMap { sounding.pitch(at: $0)?.description }
+                .joined(separator: " ")
+        }
+    }
+
+    /// Un porcentaje bipolar con su signo delante, y sin signo en el cero: el
+    /// cero no es ni subir ni bajar.
+    private func signed(_ percent: Int) -> String {
+        percent > 0 ? "+\(percent)%" : "\(percent)%"
+    }
+}

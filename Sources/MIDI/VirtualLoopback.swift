@@ -1,0 +1,108 @@
+import CoreMIDI
+import Foundation
+
+/// Destino MIDI virtual que devuelve a la app lo que ella misma envía.
+///
+/// **Solo instrumentación.** Existe para medir jitter: la app se envía a sí
+/// misma y compara cuándo pidió que sonara un evento con cuándo llegó de
+/// verdad. `tech-stack.md` (enmienda del 2026-08-26) admite endpoints virtuales
+/// con este alcance y no como funcionalidad de producto: este endpoint no debe
+/// ofrecerse nunca como destino elegible por el usuario.
+///
+/// **Qué mide y qué no.** Valida el scheduler y la entrega de CoreMIDI. **No**
+/// cruza el cable USB, así que la latencia y el jitter del interfaz MIDI quedan
+/// fuera de la medición.
+/// `@unchecked Sendable`: tras `init` el endpoint es de solo lectura y no hay
+/// estado mutable compartido.
+public final class VirtualLoopback: @unchecked Sendable {
+
+    /// Se invoca por cada paquete recibido, con el instante que se programó y
+    /// el instante real de recepción, ambos en ticks de host.
+    ///
+    /// **Corre en el hilo de alta prioridad de CoreMIDI.** Quien lo implemente
+    /// hereda las reglas de tiempo real: sin asignaciones, sin locks, sin
+    /// logging. Cualquier trabajo pesado degrada justo lo que se está midiendo.
+    public typealias ReceiveHandler =
+        @Sendable (_ scheduledHostTime: UInt64, _ actualHostTime: UInt64) -> Void
+
+    private var client = MIDIClientRef()
+    private var destination = MIDIEndpointRef()
+
+    /// Nombre del endpoint virtual que crea el arnés.
+    ///
+    /// Es una constante compartida y no un literal suelto porque la lista de
+    /// destinos del producto tiene que poder excluirlo: durante la medición de
+    /// jitter el arnés y la app corren a la vez, y este endpoint aparecería
+    /// entre los destinos elegibles como si fuera un sintetizador.
+    public static let defaultName = "Torax H-0 Loopback"
+
+    /// Nombre del endpoint que crea el arnés de medición.
+    ///
+    /// **Vive aquí y no en el arnés** para que el filtro de destinos elegibles
+    /// pueda nombrarlo. Estaba escrito como literal en `JitterHarness` y el
+    /// filtro comparaba con `defaultName`, así que no lo excluía: durante una
+    /// medición el arnés aparecía entre los sintetizadores elegibles, que es
+    /// exactamente lo que el filtro existía para impedir. Encontrado el
+    /// 2026-09-03, preparando la medición del track `external-clock_20260903`.
+    public static let measurementName = "Torax H-0 Jitter"
+
+    /// Si un endpoint lo creó la propia app.
+    ///
+    /// Ninguno de los dos es un destino de producto: son instrumentación, y la
+    /// enmienda del 2026-08-26 de `tech-stack.md` los admite solo para medir.
+    public static func isOwn(_ displayName: String) -> Bool {
+        displayName == defaultName || displayName == measurementName
+    }
+
+    /// Endpoint al que hay que enviar para cerrar el bucle.
+    public var endpoint: MIDIEndpointRef { destination }
+
+    public init(
+        name: String = VirtualLoopback.defaultName, onReceive handler: @escaping ReceiveHandler
+    ) throws {
+        let clientStatus = MIDIClientCreateWithBlock(name as CFString, &client, nil)
+        guard clientStatus == noErr else {
+            throw MIDIOutputError.clientCreationFailed(clientStatus)
+        }
+
+        let destinationStatus = MIDIDestinationCreateWithProtocol(
+            client,
+            name as CFString,
+            ._1_0,
+            &destination
+        ) { eventList, _ in
+            // Se toma el instante ANTES de hacer nada más: cualquier trabajo
+            // previo se contabilizaria como jitter que no existe.
+            let actual = HostClock.now()
+
+            // Se recorre sobre el puntero original, nunca sobre una copia por
+            // valor de la lista: `MIDIEventList` solo lleva dentro el primer
+            // paquete, y los siguientes viven en memoria de longitud variable
+            // detrás del puntero. Copiar la estructura y avanzar con
+            // `MIDIEventPacketNext` leería fuera de la copia a partir del
+            // segundo paquete.
+            //
+            // El `!` está justificado: `offset(of:)` solo devuelve `nil` para
+            // propiedades sin dirección estable, y `MIDIEventList` es una
+            // estructura de C con disposición fija.
+            let numPackets = eventList.pointee.numPackets
+            var packet = UnsafeMutableRawPointer(mutating: eventList)
+                .advanced(by: MemoryLayout<MIDIEventList>.offset(of: \.packet)!)
+                .assumingMemoryBound(to: MIDIEventPacket.self)
+            for _ in 0..<numPackets {
+                handler(packet.pointee.timeStamp, actual)
+                packet = MIDIEventPacketNext(packet)
+            }
+        }
+
+        guard destinationStatus == noErr else {
+            MIDIClientDispose(client)
+            throw MIDIOutputError.portCreationFailed(destinationStatus)
+        }
+    }
+
+    deinit {
+        MIDIEndpointDispose(destination)
+        MIDIClientDispose(client)
+    }
+}

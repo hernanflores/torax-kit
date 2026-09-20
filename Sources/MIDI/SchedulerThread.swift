@@ -1,0 +1,495 @@
+import Darwin
+import Engine
+import Foundation
+
+/// Snapshot inmutable de la configuración con la que corre el scheduler.
+///
+/// El hilo del scheduler captura este valor al arrancar y no vuelve a leer
+/// estado compartido: no hay lock que tomar porque no hay nada mutable que
+/// proteger.
+///
+/// Lo que sí cambia en caliente es el **Track**, y no viaja aquí: llega por
+/// `PatternHandoff`, que el hilo consulta una vez por ventana. Esto sigue siendo
+/// la configuración de la rejilla —tempo, división y tamaño de la ventana—, que
+/// se fija al arrancar el transporte.
+public struct SchedulerConfiguration: Sendable, Equatable {
+
+    public let timeline: MusicalTimeline
+
+    /// Cuánto se adelanta el scheduler al calcular eventos.
+    ///
+    /// Equilibrio doble: una ventana grande absorbe mejor los retrasos del
+    /// planificador del SO, pero retrasa la respuesta a un cambio de parámetro.
+    /// `product-guidelines.md` exige que un giro de knob se oiga en el Step
+    /// siguiente, y eso acota el tamaño por arriba.
+    public let lookAheadNanoseconds: Int64
+
+    public init(timeline: MusicalTimeline, lookAheadNanoseconds: Int64 = 20_000_000) {
+        self.timeline = timeline
+        self.lookAheadNanoseconds = lookAheadNanoseconds
+    }
+}
+
+/// Hilo dedicado que ejecuta el scheduler look-ahead.
+///
+/// **Qué hace en cada vuelta:** mira cuánto tiempo ha pasado desde el arranque,
+/// añade el horizonte de look-ahead y pide al `LookAheadScheduler` los Steps que
+/// caen en esa ventana. Cada Step se entrega con su instante de emisión ya
+/// calculado, para que quien lo reciba lo selle con un timestamp futuro.
+///
+/// **Por qué duerme media ventana:** despertar más a menudo no mejora la
+/// precisión —esa la da el timestamp, no el momento del envío— y solo gasta CPU.
+/// Despertar menos arriesga perder el borde de la ventana.
+///
+/// **Reglas de tiempo real.** El bucle no asigna memoria, no toma locks, no usa
+/// `await`, no registra logs y no toca SwiftUI. Lo único que comparte con otros
+/// hilos es una bandera atómica sin lock.
+public final class SchedulerThread: @unchecked Sendable {
+
+    /// Se invoca por cada Step, desde el hilo del scheduler.
+    ///
+    /// Recibe el índice de Step, la altura, el Groove con que interpretarla y
+    /// el instante de emisión en ticks de host. Quien lo implemente hereda las
+    /// reglas de tiempo real: sin asignaciones, sin locks, sin logging.
+    ///
+    /// Altura y Groove salen del **mismo** snapshot, recogido una vez por
+    /// ventana: no son dos lecturas que puedan discrepar.
+    /// **Desde la v2 llega también el índice del Track**: quien emite necesita
+    /// saber por qué canal sale cada nota, y el canal es un dato del Track.
+    ///
+    /// **Y llega el Track entero, no solo su índice.** Con el índice, quien
+    /// emitía tenía que volver al snapshot a buscar el canal y la Division, una
+    /// vez por nota. Recibirlo aquí lo deja en una lectura por ventana y, de
+    /// paso, garantiza que lo que sella la nota sea el mismo snapshot que la
+    /// produjo.
+    public typealias StepHandler =
+        @Sendable (
+            _ track: Int, _ source: Cycle, _ step: Int, _ pitch: Pitch?, _ groove: Groove,
+            _ hostTime: UInt64
+        ) -> Void
+
+    /// Se invoca por cada repetición del Note Repeater, desde el hilo del
+    /// scheduler.
+    ///
+    /// **Llega con su velocity y su gate ya resueltos**, y no con el Groove: una
+    /// repetición no suena a la Velocity del Track —la recorre la rampa— ni dura
+    /// lo que un Step, sino su propio hueco. El gate viene ya en tiempo de
+    /// reloj, convertido con el mapa de tempo como los instantes.
+    public typealias RepetitionHandler =
+        @Sendable (
+            _ track: Int, _ source: Cycle, _ step: Int, _ pitch: Pitch?, _ velocity: Velocity,
+            _ gateNanoseconds: Int64, _ hostTime: UInt64
+        ) -> Void
+
+    /// Se invoca por cada pulso de clock, desde el hilo del scheduler.
+    ///
+    /// **Solo lleva el instante**, porque un tick de System Real-Time no lleva
+    /// canal ni datos: el mensaje es el status y nada más. Quien lo implemente
+    /// hereda las reglas de tiempo real.
+    ///
+    /// **`nil` es la vía del arnés de medición**, que mide la rejilla y no el
+    /// producto: sin handler no se genera ni un pulso, así que el arnés no puede
+    /// ponerse a hacer de maestro por su cuenta.
+    public typealias ClockPulseHandler = @Sendable (_ hostTime: UInt64) -> Void
+
+    private let configuration: SchedulerConfiguration
+    private let material: SchedulerMaterial
+
+    /// Los dieciséis Tracks, cuando quien arranca el hilo los tiene.
+    ///
+    /// **`nil` es la vía del arnés de medición**, que mide la rejilla y no el
+    /// material: le basta un `SchedulerMaterial` sobre una `MusicalTimeline`. Las
+    /// dos vías construyen el mismo `PatternScheduler`, para que lo que se mide
+    /// pase por el mismo recorrido que lo que suena.
+    private let pattern: Pattern?
+    private let handoff: PatternHandoff?
+
+    /// La mezcla vigente: qué Tracks se oyen. `nil` deja sonar a los doce, que
+    /// es la vía del arnés de medición.
+    private let mutes: MuteMask?
+    private let handler: StepHandler
+    private let repetitionHandler: RepetitionHandler?
+
+    /// Quién recibe el pulso de clock, o `nil` si la app no lo emite por esta
+    /// vía.
+    private let clockPulseHandler: ClockPulseHandler?
+
+    /// Lo que se sabe del maestro externo, o `nil` si nadie sigue a ninguno.
+    ///
+    /// Se lee **una vez por ventana**, como el snapshot: leerlo por evento
+    /// permitiría que dos notas de la misma ventana cayeran sobre dos tempos
+    /// distintos.
+    private let clock: ClockHandoff?
+
+    /// Ancla temporal para el playhead. `nil` cuando nadie la mira.
+    private let playhead: PlayheadClock?
+    private let cyclePlaybackClock: CyclePlaybackClock?
+    private let running = AtomicFlag(false)
+    private let sealedHostTime = AtomicCounter()
+    private var thread: Thread?
+
+    /// - Parameters:
+    ///   - material: con qué arranca. Por defecto `.everyStep`, que es lo que
+    ///     quiere el arnés de medición.
+    ///   - handoff: por donde llegan los Tracks publicados mientras suena. `nil`
+    ///     deja el material fijo durante toda la reproducción.
+    ///   - playhead: dónde se publica el origen temporal para la interfaz.
+    ///     `nil` cuando nadie dibuja un playhead — el arnés de medición, por
+    ///     ejemplo, que no tiene pantalla.
+    public convenience init(
+        configuration: SchedulerConfiguration,
+        material: SchedulerMaterial = .everyStep,
+        handoff: PatternHandoff? = nil,
+        playhead: PlayheadClock? = nil,
+        pattern: Pattern? = nil,
+        mutes: MuteMask? = nil,
+        clock: ClockHandoff? = nil,
+        clockPulseHandler: ClockPulseHandler? = nil,
+        repetitionHandler: RepetitionHandler? = nil,
+        handler: @escaping StepHandler
+    ) {
+        self.init(
+            configuration: configuration,
+            material: material,
+            handoff: handoff,
+            playhead: playhead,
+            cyclePlaybackClock: nil,
+            pattern: pattern,
+            mutes: mutes,
+            clock: clock,
+            clockPulseHandler: clockPulseHandler,
+            repetitionHandler: repetitionHandler,
+            handler: handler)
+    }
+
+    init(
+        configuration: SchedulerConfiguration,
+        material: SchedulerMaterial = .everyStep,
+        handoff: PatternHandoff? = nil,
+        playhead: PlayheadClock? = nil,
+        cyclePlaybackClock: CyclePlaybackClock?,
+        pattern: Pattern? = nil,
+        mutes: MuteMask? = nil,
+        clock: ClockHandoff? = nil,
+        clockPulseHandler: ClockPulseHandler? = nil,
+        repetitionHandler: RepetitionHandler? = nil,
+        handler: @escaping StepHandler
+    ) {
+        self.clockPulseHandler = clockPulseHandler
+        self.repetitionHandler = repetitionHandler
+        self.clock = clock
+        self.pattern = pattern
+        self.mutes = mutes
+        self.configuration = configuration
+        self.material = material
+        self.handoff = handoff
+        self.playhead = playhead
+        self.cyclePlaybackClock = cyclePlaybackClock
+        self.handler = handler
+    }
+
+    public var isRunning: Bool { running.value }
+
+    /// Arranca el bucle.
+    ///
+    /// **El origen se puede fijar desde fuera**, y lo hace el arranque por reloj
+    /// externo: la rejilla tiene que nacer en el instante del Start del maestro,
+    /// no en el momento en que este hilo llegue a preguntar la hora. Entre los
+    /// dos hay el retraso de crear un hilo, que es pequeño pero no es cero y no
+    /// tiene por qué pagarlo la fase.
+    ///
+    /// Sin él, el origen es el instante en que arranca el bucle, como siempre.
+    public func start(atHostTime origin: UInt64? = nil) {
+        guard !running.value else { return }
+        let startHostTime = origin ?? HostClock.now()
+        sealedHostTime.value =
+            startHostTime
+            &+ HostClock.hostTicks(
+                fromNanoseconds: UInt64(max(0, configuration.lookAheadNanoseconds)))
+        running.value = true
+
+        let thread = Thread {
+            [
+                configuration, material, pattern, handoff, playhead, cyclePlaybackClock,
+                mutes, clock, clockPulseHandler, handler, repetitionHandler, running,
+                sealedHostTime,
+            ] in
+            SchedulerThread.run(
+                configuration: configuration,
+                material: material,
+                pattern: pattern,
+                handoff: handoff,
+                playhead: playhead,
+                cyclePlaybackClock: cyclePlaybackClock,
+                mutes: mutes,
+                clock: clock,
+                clockPulseHandler: clockPulseHandler,
+                handler: handler,
+                repetitionHandler: repetitionHandler,
+                running: running,
+                sealedHostTime: sealedHostTime,
+                origin: startHostTime
+            )
+        }
+        thread.name = "com.toraxh0.scheduler"
+        // **La pila por defecto de un `Thread` secundario son 512 KB, y el
+        // snapshot ya no cabe con holgura.** Con Cycles el Pattern pasó de
+        // 2304 bytes a 37 248, y este hilo lo copia entero en cada ventana: un
+        // `load()`, el material que conserva entre ventanas y los temporales del
+        // camino son varias decenas de kilobytes por marco donde antes eran unos
+        // pocos. Medido el 2026-09-02 sobre el test de concurrencia del handoff
+        // —que construye Patterns en bucle, más carga de la que este hilo hace—:
+        // desborda con 512 KB y pasa con 1 MB.
+        //
+        // No cuesta nada tenerla: es reserva de memoria virtual, y las páginas se
+        // tocan solo si se usan. Desbordarla, en cambio, es un SIGBUS en el hilo
+        // que produce el audio.
+        thread.stackSize = 1 << 20
+        // Prioridad máxima: el hilo compite con la interfaz por la CPU y el
+        // retraso aquí se traduce en eventos perdidos al borde de la ventana.
+        thread.qualityOfService = .userInteractive
+        thread.threadPriority = 1.0
+        self.thread = thread
+        thread.start()
+    }
+
+    /// Para el bucle.
+    ///
+    /// **El reloj del playhead se limpia aquí y no al salir del bucle.** Así el
+    /// playhead deja de moverse en cuanto se pide la parada y un Play inmediato
+    /// no puede ver su origen recién publicado borrado por el hilo anterior.
+    ///
+    /// La puerta del transporte puede pedir que acabe la ventana en curso antes
+    /// de volver. Esa espera vacía todos los callbacks —incluido el clock— y
+    /// permite entregar el último instante sellado de verdad. El valor por
+    /// defecto conserva la parada no bloqueante que usan los arneses de timing.
+    ///
+    /// - Parameter drainingPendingEvents: Si debe esperar a que el hilo termine.
+    /// - Returns: El mayor host time sellado hasta que termina la parada pedida.
+    @discardableResult
+    public func stop(drainingPendingEvents: Bool = false) -> UInt64 {
+        running.value = false
+        playhead?.stop()
+
+        if drainingPendingEvents, let thread, thread !== Thread.current {
+            while !thread.isFinished { usleep(100) }
+        }
+        thread = nil
+        return sealedHostTime.value
+    }
+
+    /// Bucle del scheduler.
+    ///
+    /// Realtime: este es el hilo del scheduler.
+    /// Runs the scheduler loop and emits steps within the configured look-ahead window.
+    /// - Parameters:
+    ///   - configuration: The timeline and look-ahead duration used for scheduling.
+    ///   - material: The musical material provided to the scheduler.
+    ///   - handoff: An optional source for refreshed track data.
+    ///   - playhead: An optional clock started at the scheduler's host-time origin.
+    ///   - handler: Receives each scheduled step, its pitch, groove, and host timestamp.
+    ///   - running: The flag that controls whether scheduling continues.
+    private static func run(
+        configuration: SchedulerConfiguration,
+        material: SchedulerMaterial,
+        pattern: Pattern?,
+        handoff: PatternHandoff?,
+        playhead: PlayheadClock?,
+        cyclePlaybackClock: CyclePlaybackClock?,
+        mutes: MuteMask?,
+        clock: ClockHandoff?,
+        clockPulseHandler: ClockPulseHandler?,
+        handler: StepHandler,
+        repetitionHandler: RepetitionHandler?,
+        running: AtomicFlag,
+        sealedHostTime: AtomicCounter,
+        origin: UInt64
+    ) {
+        // Con Pattern se recorren los dieciséis; sin él, la vía del arnés. Las
+        // dos construyen el mismo scheduler.
+        let scheduler =
+            pattern.map {
+                PatternScheduler(
+                    tempo: configuration.timeline.tempo, pattern: $0,
+                    playbackClock: cyclePlaybackClock, mutes: mutes)
+            } ?? PatternScheduler(timeline: configuration.timeline, material: material)
+        let startHostTicks = origin
+        let sleepNanoseconds = UInt32(max(1_000, configuration.lookAheadNanoseconds / 2))
+
+        // **El origen de la rejilla no es el instante de Play, sino
+        // `Play + presupuesto`.** Con Delay negativo el Step 0 se pide un
+        // desplazamiento por delante de su rejilla, y sin este margen ese
+        // instante caería antes de que existiera el transporte. Reservarlo aquí
+        // es lo que convierte un evento imposible en uno que llega justo en el
+        // arranque.
+        //
+        // Se lee una vez, del material con el que se arranca, como se lee la
+        // `MusicalTimeline`. Con Delay ≥ 0 vale cero y el origen es Play, sin
+        // latencia añadida. Enmienda fechada del 2026-08-30 en `tech-stack.md`.
+        let budgetNanoseconds = scheduler.advanceBudgetNanoseconds
+        let gridOriginTicks =
+            startHostTicks &+ HostClock.hostTicks(fromNanoseconds: UInt64(budgetNanoseconds))
+
+        // El mismo origen que sella los timestamps es el que ve la interfaz: si
+        // fueran dos, el playhead y lo que suena podrían discrepar. Se publica
+        // una vez, antes del bucle, y no se vuelve a tocar mientras suene.
+        playhead?.start(atHostTime: gridOriginTicks)
+
+        // **El mapa entre el reloj y la rejilla.** Sin maestro es la identidad y
+        // todo se comporta como antes de este track. Con maestro, estira o
+        // encoge la línea de tiempo sin rehacer las rejillas de los doce Tracks,
+        // que es lo que `TrackScheduler` documenta como imposible en caliente.
+        var tempoMap = TempoMap(
+            referenceQuarterNoteNanoseconds: 60.0 / configuration.timeline.tempo.beatsPerMinute
+                * 1_000_000_000.0)
+        var followedQuarterNote: UInt32 = 0
+        var appliedCorrection: Int32 = 0
+
+        // **El pulso de clock, cuando la app hace de maestro.** Mide en tiempo de
+        // rejilla, como los Steps, y se convierte a tiempo de reloj con el mismo
+        // `tempoMap`: por eso seguir a un maestro externo estira también el pulso
+        // que sale, sin nada que sincronizar entre los dos.
+        var pulses = ClockPulseScheduler(tempo: configuration.timeline.tempo)
+        var finalSealedHostTime = sealedHostTime.value
+
+        while running.value {
+            let now = HostClock.now()
+            let wallNanoseconds: Int64
+            if now >= startHostTicks {
+                wallNanoseconds = Int64(
+                    HostClock.nanoseconds(fromHostTicks: now &- startHostTicks))
+            } else {
+                // Un Start repetido puede anclar la nueva pasada al corte
+                // futuro de la anterior. Medir ese tramo como negativo evita
+                // que la resta envolvente parezca una cantidad enorme.
+                wallNanoseconds = -Int64(
+                    HostClock.nanoseconds(fromHostTicks: startHostTicks &- now))
+            }
+
+            // El reloj externo se lee **una vez por ventana**, como el snapshot:
+            // dos notas de la misma ventana no pueden caer sobre dos tempos
+            // distintos.
+            if let reading = clock?.reading, reading.isEstablished {
+                if reading.quarterNoteNanoseconds != followedQuarterNote {
+                    tempoMap.follow(
+                        quarterNoteNanoseconds: Double(reading.quarterNoteNanoseconds),
+                        atWallNanoseconds: wallNanoseconds)
+                    followedQuarterNote = reading.quarterNoteNanoseconds
+                }
+
+                // Se aplica la **diferencia** con lo ya aplicado: leer dos veces
+                // la misma publicación no corrige dos veces, y saltarse una la
+                // recupera entera.
+                let pending = reading.accumulatedCorrectionNanoseconds &- appliedCorrection
+                if pending != 0 {
+                    tempoMap.shiftOrigin(byWallNanoseconds: Int64(pending))
+                    appliedCorrection = reading.accumulatedCorrectionNanoseconds
+                }
+            }
+
+            // El tiempo se mide contra el origen de la rejilla, que puede estar
+            // por delante del arranque: durante el presupuesto, `elapsed` es
+            // negativo. No es un caso especial —el horizonte sigue siendo
+            // positivo por el look-ahead— y es lo que hace que el Step 0
+            // adelantado se programe desde la primera vuelta.
+            let elapsedNanoseconds =
+                tempoMap.gridNanoseconds(atWallNanoseconds: wallNanoseconds) - budgetNanoseconds
+            let horizon = elapsedNanoseconds + configuration.lookAheadNanoseconds
+
+            // El horizonte se publica en tiempo de host y nunca retrocede. Stop
+            // espera a que termine esta vuelta, así que al volver conoce tanto
+            // este límite como cualquier evento que se hubiera sellado más
+            // lejos por Groove.
+            let wallHorizon = tempoMap.wallNanoseconds(
+                forGridNanoseconds: budgetNanoseconds + horizon)
+            finalSealedHostTime = max(
+                finalSealedHostTime,
+                startHostTicks
+                    &+ HostClock.hostTicks(
+                        fromNanoseconds: UInt64(max(0, wallHorizon))))
+
+            // **Los pulsos van con el mismo horizonte que los Steps**, así que
+            // el clock y las notas de una misma ventana salen sellados contra la
+            // misma cuenta. Sin handler no se genera ninguno: es la vía del
+            // arnés de medición.
+            if let clockPulseHandler {
+                for tick in pulses.advance(toHorizon: horizon) {
+                    // El offset del tick es relativo al origen de la rejilla, y
+                    // el presupuesto es lo que separa ese origen del arranque —
+                    // la misma cuenta que hace el Step de abajo.
+                    let wallNanoseconds = tempoMap.wallNanoseconds(
+                        forGridNanoseconds: budgetNanoseconds
+                            + pulses.nanosecondOffset(forTick: tick))
+                    let hostTime =
+                        startHostTicks
+                            &+ HostClock.hostTicks(
+                                fromNanoseconds: UInt64(max(0, wallNanoseconds)))
+                    finalSealedHostTime = max(finalSealedHostTime, hostTime)
+                    clockPulseHandler(hostTime)
+                }
+            }
+
+            scheduler.advance(
+                toHorizon: horizon,
+                refreshingFrom: handoff,
+                // **La repetición se sella con la misma cuenta que el Pulse**, y
+                // su gate se convierte con el mismo mapa: seguir a un maestro
+                // lento tiene que alargar el hueco y el gate a la vez, o la
+                // tirada se despegaría de la rejilla que la contiene.
+                emitRepetition: { track, source, step, pitch, velocity, gate, offset in
+                    guard let repetitionHandler else { return }
+                    let gridStart = budgetNanoseconds + offset
+                    let wallStart = tempoMap.wallNanoseconds(forGridNanoseconds: gridStart)
+                    // El gate es una duración entre dos posiciones musicales.
+                    // Restarlas después de mapearlas conserva la pendiente del
+                    // tempo y cancela tanto el rebase como las correcciones de
+                    // fase que desplazan el origen.
+                    let wallGate =
+                        tempoMap.wallNanoseconds(forGridNanoseconds: gridStart + gate)
+                        - wallStart
+                    let hostTime =
+                        startHostTicks
+                        &+ HostClock.hostTicks(
+                            fromNanoseconds: UInt64(max(0, wallStart)))
+                    finalSealedHostTime = max(finalSealedHostTime, hostTime)
+                    repetitionHandler(
+                        track, source, step, pitch, velocity,
+                        wallGate, hostTime)
+                }
+            ) {
+                track, source, step, pitch, groove, offset in
+                // El offset es relativo al origen de la rejilla, y el
+                // presupuesto es lo que separa ese origen del arranque. Sumarlos
+                // deja la cuenta en positivo sin más conversiones.
+                //
+                // **El recorte a cero es una red de seguridad, y ya solo tiene
+                // un caso.** El desplazamiento nunca es más negativo que el
+                // presupuesto —hay un test exhaustivo que lo fija— así que la
+                // suma es positiva salvo que el Delay se baje a negativo
+                // *mientras suena*: entonces el presupuesto crece y el origen ya
+                // no puede acompañarlo, y una ventana de eventos se recorta una
+                // sola vez. Es la limitación 2 del spec del track.
+                //
+                // **El instante musical se convierte a tiempo de reloj con el
+                // mapa**, que es donde vive el tempo del maestro. Sin maestro la
+                // conversión es la identidad y la cuenta es la de siempre.
+                let hostTime =
+                    startHostTicks
+                    &+ HostClock.hostTicks(
+                        fromNanoseconds: UInt64(
+                            max(
+                                0,
+                                tempoMap.wallNanoseconds(
+                                    forGridNanoseconds: budgetNanoseconds + offset))))
+                finalSealedHostTime = max(finalSealedHostTime, hostTime)
+                handler(track, source, step, pitch, groove, hostTime)
+            }
+
+            sealedHostTime.value = finalSealedHostTime
+
+            usleep(sleepNanoseconds / 1_000)
+        }
+
+        sealedHostTime.value = finalSealedHostTime
+    }
+}

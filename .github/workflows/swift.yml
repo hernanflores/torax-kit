@@ -1,0 +1,39 @@
+# Build y tests del kit.
+#
+# Un solo `Package.swift` en la raíz, así que no hay `--package-path`: lo que
+# hubo que conservar de la mudanza es el REPARTO EN DOS PROCESOS.
+name: Swift
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # Los tests que crean clientes y endpoints de CoreMIDI van PRIMERO y en su
+    # propio proceso.
+    #
+    # Motivo: la suite arranca hilos de scheduler a prioridad máxima, y esa
+    # presión inutiliza la creación de endpoints virtuales de CoreMIDI para el
+    # resto del proceso. En el runner se manifiesta como `clientCreationFailed(-2)`
+    # de forma determinista; en macOS local, como `-50` intermitente.
+    #
+    # **Y juntar los cuatro paquetes en uno lo empeoró**, que era de esperar:
+    # antes cada `swift test` era su propio proceso y el aislamiento salía gratis.
+    # Medido el 2026-09-20 sobre el kit: en un solo proceso, 19 fallos
+    # inesperados; repartido así, ninguno.
+    #
+    # Es una MITIGACIÓN, no un arreglo. La causa está en el issue #44 de
+    # torax-h0; cuando se cierre, estos dos pasos vuelven a ser uno solo.
+    - name: Tests de CoreMIDI
+      run: swift test --filter 'VirtualLoopbackTests|JitterHarnessTests|CoreMIDIOutputTests|CoreMIDIInputTests'
+
+    - name: Tests del resto
+      run: swift test --skip VirtualLoopbackTests --skip JitterHarnessTests --skip CoreMIDIOutputTests --skip CoreMIDIInputTests

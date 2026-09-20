@@ -1,0 +1,343 @@
+import Engine
+
+/// Programa los dieciséis Tracks sobre un solo reloj.
+///
+/// **Un reloj, dieciséis rejillas.** El tempo y el origen temporal son
+/// compartidos —es lo que hace que dieciséis voces suenen juntas en vez de en
+/// paralelo— pero cada Track cae donde digan sus Steps, su Division, su Timing y
+/// su Delay. Aquí no hay sincronización posterior: la fase se conserva porque
+/// todas las rejillas se miden contra el **mismo origen**, no porque se ajusten
+/// entre sí.
+///
+/// **Un solo hilo los recorre.** No hay dieciséis hilos, y no es un ahorro: son
+/// dieciséis hilos a prioridad máxima lo que hoy rompe la creación de endpoints
+/// de CoreMIDI (la ampliación del 2026-08-27 de `workflow.md`). Recorrer
+/// dieciséis rejillas dentro de la ventana ya abierta es aritmética de enteros
+/// contra un presupuesto de veinte millones de nanosegundos.
+///
+/// **El snapshot se lee una vez por ventana, no una por Track.** Leerlo dieciséis
+/// veces dejaría que dos Tracks tocaran material de publicaciones distintas, que
+/// es exactamente la mezcla que el handoff existe para evitar.
+public final class PatternScheduler {
+
+    /// Material vigente. Se conserva entre ventanas: si una lectura del
+    /// snapshot se descarta, se sigue tocando esto en lugar de callar.
+    public private(set) var pattern: Pattern
+
+    /// Un scheduler por Track, reservados de una vez.
+    ///
+    /// **Se reservan al construir, y construir es lo que hace Play.** Un `Array`
+    /// metería comprobaciones de unicidad y posible conteo de referencias dentro
+    /// del bucle; esto es un bloque de memoria que vive lo que viva el objeto,
+    /// que es el mismo patrón que ya usa `PatternHandoff` con sus ranuras.
+    private let schedulers: UnsafeMutablePointer<TrackScheduler>
+
+    /// Qué Tracks se oyen ahora mismo, o `nil` si a nadie le importa.
+    ///
+    /// **`nil` es la vía del arnés de medición**, que mide la rejilla y no la
+    /// mezcla: sin máscara suenan los doce, que es lo que hacía antes de que
+    /// esto existiera.
+    ///
+    /// **Es una referencia, y se lee una vez por ventana.** No entra en el
+    /// `Pattern` porque no es material —cambiar de Pattern no mueve la mezcla—,
+    /// y no viaja por el handoff porque no hace falta: es una palabra atómica,
+    /// no un snapshot de decenas de kilobytes.
+    private let mutes: MuteMask?
+
+    /// La rejilla de compás, para el cambio de Pattern cuantizado (FR6).
+    ///
+    /// **Es del scheduler y no del Track** porque el compás es lo único común a
+    /// los doce: cada Track tiene su propia longitud de anillo y esperar a que
+    /// cierren todos no converge.
+    private let bars: BarGrid
+
+    /// Hasta dónde llegó la ventana anterior.
+    ///
+    /// **Es lo que permite saber si un límite de compás cae dentro de esta
+    /// ventana.** Sin él habría que preguntárselo a los Tracks, que cuentan
+    /// Steps y no negras.
+    private var lastHorizonNanoseconds: Int64 = 0
+
+    /// Cada Track lleva su propia rejilla porque lleva su propia Division.
+    ///
+    /// Se construyen aquí, con el tempo compartido: **el origen es el mismo para
+    /// los dieciséis**, y por eso dos Divisions distintas caen en fase sin
+    /// ajustarse entre sí.
+    ///
+    /// La promesa vale en Play. Un Track que cambia de Division mientras suena
+    /// —por el knob o por el avance de Cycle— reancla desde su propio corte y
+    /// deja de estar en fase con este origen (`division-hot-grid_20260911`,
+    /// FR8); Play vuelve a construirlos todos contra el mismo.
+    ///
+    /// - Parameters:
+    ///   - tempo: el tempo compartido; lo fija el transporte.
+    ///   - pattern: con qué material se arranca.
+    ///   - seed: semilla base del aleatorio. Cada Track deriva la suya, para que
+    ///     dos Tracks con la misma Probability no omitan los mismos Pulses.
+    ///   - mutes: la mezcla vigente. `nil` deja sonar a los doce.
+    public convenience init(
+        tempo: Tempo,
+        pattern: Pattern,
+        startingAtStep startingStep: Int = 0,
+        seed: UInt64 = SeededRandom.defaultSeed,
+        mutes: MuteMask? = nil
+    ) {
+        self.init(
+            tempo: tempo, pattern: pattern, startingAtStep: startingStep,
+            seed: seed, playbackClock: nil, mutes: mutes)
+    }
+
+    init(
+        tempo: Tempo,
+        pattern: Pattern,
+        startingAtStep startingStep: Int = 0,
+        seed: UInt64 = SeededRandom.defaultSeed,
+        playbackClock: CyclePlaybackClock?,
+        mutes: MuteMask? = nil
+    ) {
+        self.pattern = pattern
+        self.mutes = mutes
+        self.bars = BarGrid(tempo: tempo)
+        schedulers = .allocate(capacity: Pattern.trackCount)
+
+        for index in 0..<Pattern.trackCount {
+            let track = pattern.track(at: index)!
+            let cycle = track.cycle(at: 0)!
+            var scheduler = TrackScheduler(
+                timeline: MusicalTimeline(tempo: tempo, division: cycle.shape.division),
+                material: .cycle(cycle),
+                startingAtStep: startingStep,
+                seed: Self.seed(seed, forTrack: index)
+            )
+            if let playbackClock {
+                scheduler.reportPlayback(to: playbackClock, track: index)
+            }
+            // **Play arranca los dieciséis en su Cycle 1** (FR6): construir esto
+            // es lo que hace Play, así que el reinicio va aquí y no en otro
+            // sitio que hubiera que acordarse de llamar.
+            scheduler.refresh(with: track)
+            scheduler.restartCycles()
+            schedulers.advanced(by: index).initialize(to: scheduler)
+        }
+    }
+
+    /// Un solo material sobre una rejilla dada, y quince Tracks vacíos.
+    ///
+    /// **Es la vía del arnés de medición**, que mide la rejilla temporal y no el
+    /// material musical: le hace falta `.everyStep` sobre una `MusicalTimeline`
+    /// concreta, no dieciséis Tracks. Comparte el recorrido con el camino normal
+    /// para que el arnés siga midiendo lo mismo que suena.
+    public convenience init(
+        timeline: MusicalTimeline,
+        material: SchedulerMaterial,
+        startingAtStep startingStep: Int = 0,
+        seed: UInt64 = SeededRandom.defaultSeed
+    ) {
+        self.init(
+            tempo: timeline.tempo, pattern: Pattern(), startingAtStep: startingStep, seed: seed)
+        schedulers[0] = TrackScheduler(
+            timeline: timeline,
+            material: material,
+            startingAtStep: startingStep,
+            seed: Self.seed(seed, forTrack: 0)
+        )
+    }
+
+    deinit {
+        schedulers.deinitialize(count: Pattern.trackCount)
+        schedulers.deallocate()
+    }
+
+    /// La semilla de un Track, derivada de la base.
+    ///
+    /// **Dos Tracks con la misma Probability no deben omitir los mismos
+    /// Pulses**, o el aleatorio se oiría como una sola decisión en vez de como
+    /// dieciséis voces independientes. Se deriva en vez de sortearse para que
+    /// siga cumpliéndose la promesa de `tech-stack.md`: pulsar Play dos veces
+    /// reproduce la misma secuencia.
+    ///
+    /// El multiplicador es un entero grande impar —el de Knuth para
+    /// dispersión multiplicativa— así que índices contiguos dan semillas muy
+    /// separadas y no secuencias emparentadas.
+    static func seed(_ base: UInt64, forTrack index: Int) -> UInt64 {
+        base &+ UInt64(index) &* 0x9E37_79B9_7F4A_7C15
+    }
+
+    /// Cuánto hay que reservar por delante para que ningún evento adelantado se
+    /// pida para un instante que ya pasó.
+    ///
+    /// **Es el mayor de los dieciséis**, no el del primero: el origen de la
+    /// rejilla es común, así que tiene que dar cabida al Track que más se
+    /// adelanta.
+    ///
+    /// Realtime: llamado desde el hilo del scheduler.
+    /// Sin asignaciones, sin locks, sin await.
+    public var advanceBudgetNanoseconds: Int64 {
+        var budget: Int64 = 0
+        for index in 0..<Pattern.trackCount {
+            budget = max(budget, schedulers[index].advanceBudgetNanoseconds)
+        }
+        return budget
+    }
+
+    /// Recoge el snapshot pendiente y emite lo que dispare hasta el horizonte,
+    /// Track por Track.
+    ///
+    /// `emit` recibe el índice del Track y **el Track que produjo el evento**.
+    /// Quien emite necesita el canal y la Division, que son datos del Track, y
+    /// entregárselos aquí es lo que le evita volver a leer el snapshot: la
+    /// lectura se hace una vez por ventana, no una por nota. Con 2,25 KB esa
+    /// diferencia era invisible; con Cycles el snapshot es dieciséis veces mayor
+    /// y sería una copia de decenas de kilobytes por nota, en el hilo de tiempo
+    /// real.
+    ///
+    /// Es además lo que garantiza que el canal y la Division con que sale una
+    /// nota sean los del **mismo** snapshot que la produjo, y no los de una
+    /// publicación que haya caído entre medias.
+    ///
+    /// **Un Track sin material no programa nada** (NFR3): su rejilla avanza
+    /// —para que no pierda la fase si alguien le da alturas mientras suena— pero
+    /// no se emite. El coste crece con los Tracks que suenan, no con dieciséis
+    /// siempre.
+    ///
+    /// Realtime: llamado desde el hilo del scheduler.
+    /// Sin asignaciones, sin locks, sin await.
+    public func advance(
+        toHorizon horizonNanoseconds: Int64,
+        refreshingFrom handoff: PatternHandoff?,
+        emitRepetition: (
+            (
+                _ track: Int, _ source: Cycle, _ step: Int, _ pitch: Pitch?, _ velocity: Velocity,
+                _ gateNanoseconds: Int64, _ offsetNanoseconds: Int64
+            ) -> Void
+        )? = nil,
+        emit: (
+            _ track: Int, _ source: Cycle, _ step: Int, _ pitch: Pitch?, _ groove: Groove,
+            _ offsetNanoseconds: Int64
+        ) -> Void
+    ) {
+        // **El cambio de Pattern cuantizado parte la ventana** (FR6).
+        //
+        // Si hay un Pattern armado y un límite de compás cae dentro de esta
+        // ventana, se emite hasta el límite con el material viejo, se adopta, y
+        // se sigue hasta el horizonte con el nuevo. Emitir la ventana entera y
+        // adoptar después dejaría el cambio hasta 20 ms tarde; adoptar antes lo
+        // dejaría hasta 20 ms pronto. Las dos son audibles a la escala de un
+        // Step de 125 ms.
+        //
+        // Realtime: la comprobación es una lectura atómica y una comparación,
+        // medidas en `ArmedSlotCostTests` — 0,0232% de la ventana.
+        if let handoff, handoff.hasArmedPattern {
+            let boundary = bars.nextBoundary(after: lastHorizonNanoseconds)
+            if boundary <= horizonNanoseconds {
+                emitWindow(
+                    toHorizon: boundary, refreshingFrom: handoff, emitRepetition: emitRepetition,
+                    emit: emit)
+                handoff.adoptArmedPattern()
+
+                // **El Pattern entra por el principio de su desarrollo** (FR8).
+                //
+                // El material nuevo lo recoge `emitWindow` en la llamada de
+                // abajo, pero el cursor de reproducción es de este hilo y no
+                // viene en el snapshot: hay que ponerlo a cero aquí. Sin esto,
+                // el Pattern entrante empieza por el Cycle en el que se hubiera
+                // quedado el anterior, que es un número sin significado para él.
+                //
+                // Es la misma llamada que hace Play, y por la misma razón:
+                // disparar el break tiene que sonar igual las dos veces.
+                for index in 0..<Pattern.trackCount {
+                    schedulers[index].restartCyclesAtNextStep()
+                }
+
+                lastHorizonNanoseconds = boundary
+                emitWindow(
+                    toHorizon: horizonNanoseconds, refreshingFrom: handoff,
+                    emitRepetition: emitRepetition, emit: emit)
+                lastHorizonNanoseconds = horizonNanoseconds
+                return
+            }
+        }
+
+        emitWindow(
+            toHorizon: horizonNanoseconds, refreshingFrom: handoff, emitRepetition: emitRepetition,
+            emit: emit)
+        lastHorizonNanoseconds = horizonNanoseconds
+    }
+
+    /// Emite un tramo con el material vigente. Es el cuerpo de siempre de
+    /// `advance`, extraído para poder llamarlo dos veces cuando un límite de
+    /// compás parte la ventana.
+    ///
+    /// Realtime: llamado desde el hilo del scheduler.
+    /// Sin asignaciones, sin locks, sin await.
+    private func emitWindow(
+        toHorizon horizonNanoseconds: Int64,
+        refreshingFrom handoff: PatternHandoff?,
+        emitRepetition: (
+            (
+                _ track: Int, _ source: Cycle, _ step: Int, _ pitch: Pitch?, _ velocity: Velocity,
+                _ gateNanoseconds: Int64, _ offsetNanoseconds: Int64
+            ) -> Void
+        )?,
+        emit: (
+            _ track: Int, _ source: Cycle, _ step: Int, _ pitch: Pitch?, _ groove: Groove,
+            _ offsetNanoseconds: Int64
+        ) -> Void
+    ) {
+        // Una sola lectura para los dieciséis: dos lecturas podrían caer a
+        // ambos lados de una publicación.
+        if let published = handoff?.load() {
+            pattern = published
+            for index in 0..<Pattern.trackCount {
+                schedulers[index].refresh(with: pattern.track(at: index)!)
+            }
+        }
+
+        // **La mezcla se lee una vez por ventana, como el snapshot y por la
+        // misma razón.** Dos lecturas dentro de la misma ventana podrían caer a
+        // ambos lados de un gesto y partirla: unos Steps del Track sonarían y
+        // otros no, sin que nadie haya pedido eso. Una lectura, una decisión
+        // para los doce.
+        //
+        // Sin máscara suenan todos: es la vía del arnés, que mide la rejilla y
+        // no la mezcla.
+        let mix = mutes?.load()
+
+        for index in 0..<Pattern.trackCount {
+            // **El Cycle lo entrega el scheduler del Track, evento a evento, y
+            // no se lee del Pattern.** Desde que el Cycle avanza en el límite de
+            // vuelta, el material puede cambiar *dentro* de una ventana, así que
+            // preguntarle al Pattern daría el Cycle de la vuelta equivocada en
+            // los Steps posteriores al cambio. No es una lectura del snapshot:
+            // el scheduler ya lo tiene delante.
+            //
+            // La vía del arnés no tiene Cycle detrás; se le da el del hueco
+            // vacío, que es lo que se le daba antes.
+            let fallback = pattern.cycle(at: index)!
+
+            // **El Track inaudible avanza igual y no emite.** La rejilla se
+            // mueve dentro de `advance`, así que saltarse la llamada pararía el
+            // Track: lo que se salta es la emisión, dentro del cierre. Es el
+            // mismo criterio que ya rige para un Track sin material (NFR3), y
+            // es lo que hace que quitar el mute devuelva el Track **en fase**
+            // en vez de al principio del anillo.
+            let audible = mix?.isAudible(index) ?? true
+
+            schedulers[index].advance(
+                toHorizon: horizonNanoseconds,
+                refreshingFrom: nil,
+                // **Un literal y no `emitRepetition.map { … }`.** El `map`
+                // construye un cierre nuevo por Track y por ventana, que es una
+                // asignación en el hilo de tiempo real (NFR1). Este literal es
+                // no-escapante y captura solo valores triviales.
+                emitRepetition: { source, step, pitch, velocity, gate, offset in
+                    guard audible, let emitRepetition else { return }
+                    emitRepetition(index, source ?? fallback, step, pitch, velocity, gate, offset)
+                }
+            ) { source, step, pitch, groove, offset in
+                guard audible else { return }
+                emit(index, source ?? fallback, step, pitch, groove, offset)
+            }
+        }
+    }
+}

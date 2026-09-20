@@ -1,0 +1,129 @@
+import Engine
+import XCTest
+@testable import MIDI
+
+/// Tests de la emisión de notas por pulso.
+///
+/// Un pulso no es una nota: es una posición del anillo que dispara. Convertirlo
+/// en sonido exige **dos** mensajes, note-on y note-off, y el segundo tiene que
+/// ir sellado con su propio instante futuro. Sin note-off la nota queda colgada
+/// en el sintetizador; con un temporizador o un sleep para enviarlo se
+/// reintroduciría justo el jitter que la arquitectura evita.
+final class NoteEmitterTests: XCTestCase {
+
+    /// El gate sale de Sustain, así que un Step de 25 ms con el Groove por
+    /// defecto —Sustain 100%, una Division completa— produce exactamente el gate
+    /// de 25 ms contra el que estos tests ya comparaban.
+    ///
+    /// **Desde la v2 la duración llega por llamada y no por construcción**: es de
+    /// cada Track, porque la Division lo es.
+    private func emitter(stepDurationNanoseconds: Int64 = 25_000_000) -> NoteEmitter {
+        NoteEmitter()
+    }
+
+    private let defaultStepNanoseconds: Int64 = 25_000_000
+
+    /// Recoge lo que el emisor entregaría al camino de envío.
+    private func emitted(
+        from emitter: NoteEmitter,
+        stepDurationNanoseconds: Int64 = 25_000_000,
+        atHostTime hostTime: UInt64
+    ) -> [(message: MIDIMessage, hostTime: UInt64)] {
+        var sent: [(MIDIMessage, UInt64)] = []
+        // La altura llega por parámetro desde Tonal y el Groove desde esta
+        // rebanada; estos tests miden el par de mensajes y su sellado, así que
+        // cualquiera de los dos sirve.
+        emitter.emit(
+            pitch: Pitch(48)!, groove: .default, on: MIDIChannel(1)!,
+            stepDurationNanoseconds: stepDurationNanoseconds, atHostTime: hostTime
+        ) { message, time in
+            sent.append((message, time))
+        }
+        return sent
+    }
+
+    // MARK: - El par
+
+    func testEachPulseEmitsExactlyTwoMessages() {
+        XCTAssertEqual(emitted(from: emitter(), atHostTime: 1_000).count, 2)
+    }
+
+    func testFirstMessageIsNoteOnAtThePulseInstant() {
+        let sent = emitted(from: emitter(), atHostTime: 5_000)
+        XCTAssertEqual(
+            sent[0].message,
+            .noteOn(channel: MIDIChannel(1)!, note: MIDINote(48)!, velocity: MIDIVelocity(100)!)
+        )
+        XCTAssertEqual(sent[0].hostTime, 5_000)
+    }
+
+    /// El note-off lleva su propio timestamp futuro: se entrega en la misma
+    /// llamada que el note-on, no más tarde.
+    func testSecondMessageIsNoteOffStampedAGateLater() {
+        let gate: Int64 = 25_000_000
+        let sent = emitted(from: emitter(stepDurationNanoseconds: gate), atHostTime: 5_000)
+
+        guard case .noteOff = sent[1].message else {
+            return XCTFail("el segundo mensaje debería ser note-off, fue \(sent[1].message)")
+        }
+        XCTAssertEqual(
+            sent[1].hostTime,
+            5_000 &+ HostClock.hostTicks(fromNanoseconds: UInt64(gate))
+        )
+    }
+
+    func testNoteOffMatchesTheNoteOnChannelAndNote() {
+        let sent = emitted(from: emitter(), atHostTime: 0)
+        guard
+            case .noteOn(let onChannel, let onNote, _) = sent[0].message,
+            case .noteOff(let offChannel, let offNote, _) = sent[1].message
+        else { return XCTFail("no se emitió el par note-on/note-off") }
+
+        XCTAssertEqual(onChannel, offChannel)
+        XCTAssertEqual(onNote, offNote)
+    }
+
+    /// El note-off va siempre por delante en el tiempo, nunca antes ni a la vez:
+    /// un note-off con el mismo timestamp que su note-on es una nota de duración
+    /// cero, que muchos sintetizadores se comen.
+    func testNoteOffIsStrictlyAfterNoteOn() {
+        let sent = emitted(from: emitter(), atHostTime: 9_999)
+        XCTAssertGreaterThan(sent[1].hostTime, sent[0].hostTime)
+    }
+
+    // MARK: - El gate provisional
+
+    // MARK: - El guardián de los 25 ms, retirado
+
+    // **Aquí vivía `testProvisionalGateFitsInsideTheShortestPossibleStep`.**
+    // Comprobaba que el gate constante cupiera en el Step más corto que el
+    // producto podía producir, para que el note-off de un pulso no llegara
+    // después del note-on del siguiente.
+    //
+    // Se retira con su constante en la rebanada 5. El límite que vigilaba era
+    // «que el gate quepa en el Step», y con Sustain eso deja de ser una
+    // invariante del sistema para pasar a ser **una elección del usuario**: el
+    // rango llega al 200% justamente para permitir ligar sobre el Step
+    // siguiente. Un test que siguiera exigiendo lo contrario fallaría por hacer
+    // el producto lo que se le pide.
+    //
+    // Lo que sustituye a esa protección no es otro test sino una decisión
+    // escrita: el solape no se vigila, el tope del 200% lo acota a un solo
+    // vecino, y el síntoma —una altura que se corta a sí misma con pool de una
+    // nota— está en el spec como limitación conocida y se verifica a propósito
+    // en dispositivo.
+
+    /// El emisor no consulta el reloj: dado el mismo instante de pulso, produce
+    /// siempre exactamente los mismos dos mensajes.
+    func testEmissionIsDeterministic() {
+        let emitter = emitter()
+        let first = emitted(from: emitter, atHostTime: 7_777)
+        for _ in 0..<100 {
+            let again = emitted(from: emitter, atHostTime: 7_777)
+            XCTAssertEqual(again[0].message, first[0].message)
+            XCTAssertEqual(again[0].hostTime, first[0].hostTime)
+            XCTAssertEqual(again[1].message, first[1].message)
+            XCTAssertEqual(again[1].hostTime, first[1].hostTime)
+        }
+    }
+}
