@@ -46,7 +46,7 @@ public enum MIDIOutputError: Error, Equatable {
 /// Envía con `MIDISendEventList` y un **timestamp de entrega futuro**: CoreMIDI
 /// se encarga de emitir el evento en ese instante exacto. Esa es la pieza que
 /// hace que el jitter deje de depender de cuándo despierta el hilo del
-/// scheduler (`conductor/tech-stack.md`).
+/// scheduler. Ver `RULES.md`.
 /// `@unchecked Sendable`: tras `init` los dos handles de CoreMIDI son de solo
 /// lectura, `MIDISendEventList` es seguro entre hilos, y el único estado mutable
 /// —el callback de notificaciones— vive tras un lock.

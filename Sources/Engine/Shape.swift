@@ -94,7 +94,7 @@ public struct Rotate: Equatable, Sendable {
 ///
 /// Es un valor inmutable y `Sendable` a propósito: es lo que cruza al hilo del
 /// scheduler como snapshot, y por eso no hay ningún lock que tomar en el camino
-/// de timing (`conductor/code_styleguides/swift.md`).
+/// de timing (regla 2 de `RULES.md`).
 public struct Shape: Equatable, Sendable {
 
     /// Valor rítmico de cada Step. Default del producto: 1/16.

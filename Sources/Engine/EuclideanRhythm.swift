@@ -10,8 +10,8 @@
 /// **Por qué una máscara de bits.** El patrón se calcula una sola vez, al
 /// construir el valor, y se guarda en un `UInt16`. Consultarlo es entonces un
 /// desplazamiento y una comparación: sin array que recorrer y sin nada que
-/// asignar, que es lo que exige el camino del scheduler
-/// (`conductor/code_styleguides/swift.md`).
+/// asignar, que es lo que exige el camino del scheduler (regla 2 de
+/// `RULES.md`).
 ///
 /// Que quepa en 16 bits no es casualidad ni una optimización arriesgada: `Steps`
 /// está acotado a 1–16 en v1, así que el tipo del almacén y el rango del dominio

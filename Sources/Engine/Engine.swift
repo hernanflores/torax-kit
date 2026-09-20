@@ -16,7 +16,6 @@ public enum EngineSchema {
     /// Versión del esquema del modelo persistido.
     ///
     /// Se declara desde el primer commit porque el modelo va a crecer al
-    /// incorporar lo que v1 dejó fuera (Cycles, Random, LFO). Ver
-    /// `conductor/tech-stack.md`.
+    /// incorporar lo que v1 dejó fuera (Cycles, Random, LFO).
     public static let schemaVersion = 1
 }

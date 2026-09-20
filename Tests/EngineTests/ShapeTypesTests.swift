@@ -5,7 +5,7 @@ import XCTest
 /// Tests de los tipos de Shape.
 ///
 /// La validación vive en el inicializador, no en cada sitio de uso
-/// (`conductor/code_styleguides/swift.md`): un `Steps` o un `Pulses` que existe
+/// (regla 1 de `RULES.md`): un `Steps` o un `Pulses` que existe
 /// es siempre musicalmente válido, y el resto del motor puede confiar en ello
 /// sin volver a comprobarlo.
 final class ShapeTypesTests: XCTestCase {

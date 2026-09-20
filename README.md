@@ -33,6 +33,12 @@ Lo que eso impone al código que corre en el hilo del scheduler: **sin
 asignaciones, sin locks, sin `await`, sin logging.** Está documentado en cada
 sitio donde importa.
 
+## Las reglas
+
+Tres, y están en [`RULES.md`](RULES.md): el dominio se valida en el tipo, el
+camino del scheduler no asigna ni bloquea, y `Engine` es puro. El código las
+cita por número donde importan.
+
 ## Qué se vigila solo
 
 `Engine` no puede importar Foundation, CoreMIDI, Combine ni SwiftUI:

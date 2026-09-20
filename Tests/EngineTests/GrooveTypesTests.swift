@@ -5,7 +5,7 @@ import XCTest
 /// Tests de los tipos de Groove.
 ///
 /// Mismo criterio que `ShapeTypesTests`: la validación vive en el
-/// inicializador, no en cada sitio de uso (`conductor/code_styleguides/swift.md`).
+/// inicializador, no en cada sitio de uso (regla 1 de `RULES.md`).
 /// Un `Velocity` que existe es siempre emisible; un `Sustain` que existe es
 /// siempre una duración musical razonable.
 final class GrooveTypesTests: XCTestCase {

@@ -1,8 +1,7 @@
 /// Tempo en pulsos por minuto.
 ///
-/// El rango se valida en el tipo, no en cada sitio de uso
-/// (`conductor/code_styleguides/swift.md`): un `Tempo` que existe es siempre
-/// musicalmente válido.
+/// El rango se valida en el tipo, no en cada sitio de uso (regla 1 de
+/// `RULES.md`): un `Tempo` que existe es siempre musicalmente válido.
 public struct Tempo: Equatable, Sendable {
 
     /// Rango admitido. Fuera de él no hay uso musical razonable y sí riesgo de

@@ -2,7 +2,7 @@ import XCTest
 
 /// Guarda la pureza del paquete `Engine`.
 ///
-/// `conductor/tech-stack.md` exige que el motor generativo no dependa de nada
+/// La regla 3 de `RULES.md` exige que el motor generativo no dependa de nada
 /// más allá de la stdlib de Swift: es lo que permite testearlo sin simulador y
 /// lo que impide que la lógica musical se enrede con CoreMIDI o SwiftUI.
 ///
@@ -58,7 +58,7 @@ final class DependencyBoundaryTests: XCTestCase {
                     """
                     \(file.lastPathComponent):\(index + 1) importa '\(module)'.
                     Engine debe depender solo de la stdlib de Swift \
-                    (conductor/tech-stack.md).
+                    (regla 3 de RULES.md).
                     """
                 )
             }
@@ -85,7 +85,7 @@ final class DependencyBoundaryTests: XCTestCase {
             """
             El target 'Engine' del manifiesto declara dependencias, o cambió de \
             forma. Engine debe depender solo de la stdlib de Swift \
-            (conductor/tech-stack.md).
+            (regla 3 de RULES.md).
             """
         )
     }
