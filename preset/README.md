@@ -2,7 +2,7 @@
 
 Qué significa cada control físico del Arturia BeatStep Pro cuando controla la
 app. **Los mismos números que declara `ControlMapping`** en
-`Packages/MIDI/Sources/MIDI/ControlMapping.swift`: si uno de los dos cambia, el
+`Sources/MIDI/ControlMapping.swift`: si uno de los dos cambia, el
 otro está mal.
 
 La tabla legible por máquina está en
