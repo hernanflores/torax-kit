@@ -801,6 +801,24 @@ public struct ModulationResponseStep: Equatable, Sendable {
 
     /// Si el Step es pulso euclidiano.
     public let triggers: Bool
+
+    /// El valor más bajo que puede sonar en este Step, recorte incluido.
+    ///
+    /// **Con una onda periódica es `value`**: la onda se conoce entera y la
+    /// banda es un punto. Con `random`, `value` es la base y la banda dice entre
+    /// qué dos valores va a caer lo que suene — el siguiente no se sabe hasta
+    /// que suena (Random Modulation, FR12).
+    public let lowest: Int
+
+    /// El valor más alto que puede sonar en este Step, recorte incluido.
+    public let highest: Int
+
+    init(value: Int, triggers: Bool, lowest: Int? = nil, highest: Int? = nil) {
+        self.value = value
+        self.triggers = triggers
+        self.lowest = lowest ?? value
+        self.highest = highest ?? value
+    }
 }
 
 extension Cycle {
@@ -829,10 +847,31 @@ extension Cycle {
     /// - Returns: One entry per step of the cycle, in order.
     public var modulationResponse: [ModulationResponseStep] {
         let stepCount = shape.steps.count
+        guard !modulation.waveform.isPeriodic else {
+            return (0..<stepCount).map { step in
+                ModulationResponseStep(
+                    value: modulationValue(atStep: step, of: stepCount),
+                    triggers: triggers(atStep: step)
+                )
+            }
+        }
+
+        // **Con `random`, los bordes son los de `pulse`.** `pulse` vale +100 en
+        // la primera mitad de la vuelta y −100 en la segunda, que son
+        // exactamente las dos excursiones extremas de `random`. Pasarlas por
+        // el camino de siempre —en una vuelta de dos Steps— da los bordes con
+        // su recorte y con el freno de pitch, sin una segunda fórmula. El
+        // offset crece con la excursión, así que no hay nada fuera de ellos.
+        let neutral = with(modulation: modulation.with(depth: .default))
+        let extremes = with(modulation: modulation.with(waveform: .pulse))
+        let up = extremes.modulationValue(atStep: 0, of: 2)
+        let down = extremes.modulationValue(atStep: 1, of: 2)
         return (0..<stepCount).map { step in
             ModulationResponseStep(
-                value: modulationValue(atStep: step, of: stepCount),
-                triggers: triggers(atStep: step)
+                value: neutral.modulationValue(atStep: step, of: stepCount),
+                triggers: triggers(atStep: step),
+                lowest: min(up, down),
+                highest: max(up, down)
             )
         }
     }
