@@ -2,3 +2,9 @@ Task: Modulation.offset con random (random-modulation_20261030, Fase 2)
 Cambios: offset(atStep:of:absoluteStep:seed:) y velocity(atStep:of:absoluteStep:seed:from:), con defaults.
 Tests: RandomModulationOffsetTests (4): neutro (AC 2), espejo (AC 8), fórmula de siempre, velocity varía por vuelta. Engine 1138/1138.
 Por qué: el offset es el punto donde la onda se convierte en unidades del destino; tiene que llevar el contexto de random sin tocar la fórmula.
+
+Checkpoint Fase 2 (random-modulation_20261030)
+Comandos: swift test en las dos particiones del issue #44; swift test --enable-code-coverage --filter 'EngineTests\.|PersistenceTests\.' + llvm-profdata merge.
+Resultado: Engine 1138/1138; Engine+Persistence 1202/1202; cobertura Engine 98,77% líneas (umbral 90%).
+Fallo previo, no de este track: TransportTests.testStopNoteOffIsStampedAheadOfAnythingAlreadyScheduled falla 3/3 también en main (2a449cd): el note-off sale ~14 ms por delante y el test exige >15 ms. Para la rebanada 1.
+Verificación manual: no aplica (sin pausa hasta la Fase 8, decisión del 2026-09-16).
