@@ -177,14 +177,27 @@ final class TransportTests: XCTestCase {
         }
         XCTAssertGreaterThan(silenceAt, beforeStop, "el note-off de parada salió en «ahora»")
 
-        // Una ventana es 20 ms; se admite algo menos por el tiempo transcurrido
-        // entre tomar `beforeStop` y sellar el mensaje.
-        let aheadNanoseconds = HostClock.nanoseconds(fromHostTicks: silenceAt &- beforeStop)
-        XCTAssertGreaterThan(
-            aheadNanoseconds,
-            15_000_000,
-            "el note-off de parada no cubre la ventana de look-ahead"
-        )
+        // **Lo que el nombre promete: nada de lo ya entregado suena después del
+        // silencio.** Cada mensaje que el scheduler llegó a mandar —con su
+        // instante futuro, hasta el horizonte— queda en o antes del note-off de
+        // parada. Si `stop()` sellara en «ahora», un evento ya planificado
+        // dentro de la ventana caería detrás y volvería a sonar.
+        //
+        // **Los note-off quedan fuera.** El de final de nota sale junto con su
+        // note-on, sellado al final del gate —30 ms después del silencio en
+        // este arnés—, y tras Stop es redundante: no hace sonar nada.
+        //
+        // > **Antes exigía «más de 15 ms por delante»** (2026-10-30). El
+        // > horizonte sellado depende de cuándo despertó el hilo por última vez
+        // > —cada 10 ms, mirando 20 ms adelante—, así que la ventaja real cae
+        // > entre 10 y 20 ms según la fase en que llegue Stop: el umbral de 15
+        // > fallaba o pasaba por fase, no por comportamiento. En local caía
+        // > siempre en 12,6 ms, y en CI se vio entre 0,5 y 13,8.
+        for (message, time) in zip(recorder.all, recorder.allTimes) {
+            if case .noteOff = message { continue }
+            XCTAssertLessThanOrEqual(
+                time, silenceAt, "\(message) está planificado después del note-off de parada")
+        }
     }
 
     // MARK: - Publicar mientras suena
