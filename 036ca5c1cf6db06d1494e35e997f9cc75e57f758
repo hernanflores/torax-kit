@@ -3,3 +3,8 @@ Cambios: TrackScheduler.modulationSeed (let), SchedulerMaterial.modulatedPitch c
 Tests: RandomModulationInSchedulerTests (8): valor del Step absoluto, AC 3, AC 4, repeticiones por vuelta, AC 5 (salvo repeats), AC 6, pitch en escala, repeats recortado en 0.
 Suite sin CoreMIDI: 2227 tests, 1 fallo previo de main (TransportTests).
 Por qué: el Step de la rejilla cuenta desde Play y la semilla es fija; con eso basta para repetir por Play sin estado nuevo.
+
+Checkpoint Fase 3 (random-modulation_20261030)
+Comandos: las dos particiones del issue #44 con --enable-code-coverage, profraw copiados entre pasadas (SwiftPM vacía codecov/ al empezar cada una) y llvm-profdata merge -sparse.
+Resultado: 2227 + 21 tests; 1 fallo previo de main (TransportTests). Cobertura: Engine 98,77%, MIDI 92,62%, Persistence 99,04%; TrackScheduler 98,47%.
+Verificación manual: no aplica (sin pausa hasta la Fase 8).
