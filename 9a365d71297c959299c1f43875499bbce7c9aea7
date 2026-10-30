@@ -1,0 +1,4 @@
+Task: Modulation.offset con random (random-modulation_20261030, Fase 2)
+Cambios: offset(atStep:of:absoluteStep:seed:) y velocity(atStep:of:absoluteStep:seed:from:), con defaults.
+Tests: RandomModulationOffsetTests (4): neutro (AC 2), espejo (AC 8), fórmula de siempre, velocity varía por vuelta. Engine 1138/1138.
+Por qué: el offset es el punto donde la onda se convierte en unidades del destino; tiene que llevar el contexto de random sin tocar la fórmula.
