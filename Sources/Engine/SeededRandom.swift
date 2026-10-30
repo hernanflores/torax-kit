@@ -54,3 +54,31 @@ public struct SeededRandom: Equatable, Sendable {
         return state &* 0x2545_F491_4F6C_DD1D
     }
 }
+
+extension SeededRandom {
+
+    /// Un valor aleatorio en −100…100 para el Step absoluto `step`, **sin
+    /// estado**: el aleatorio de la onda `random` de la modulación.
+    ///
+    /// **No avanza ningún generador**, y es la razón de que exista aparte de
+    /// `next()`. El consumo de `SeededRandom` es lo que fija las omisiones de
+    /// Probability; si la modulación tirara de él, poner `random` en un Cycle
+    /// movería los huecos de un patrón que nadie tocó. Sigue siendo
+    /// determinista y sembrado, que es lo que pide `RULES.md` §3.
+    ///
+    /// **Varía por vuelta y se repite por Play**, como Probability: el Step
+    /// absoluto crece a lo largo de una pasada y vuelve a empezar al pulsar
+    /// Play, y la semilla es fija.
+    ///
+    /// El mezclador es el finalizador de *SplitMix64* sobre `seed ^ step`:
+    /// dos multiplicaciones y tres desplazamientos, sin asignación. El sesgo del
+    /// módulo 201 sobre 2⁶⁴ no se oye.
+    public static func excursion(seed: UInt64, atStep step: Int) -> Int {
+        var z = seed ^ UInt64(bitPattern: Int64(step))
+        z &+= 0x9E37_79B9_7F4A_7C15
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        z ^= z >> 31
+        return Int(z % 201) - 100
+    }
+}
