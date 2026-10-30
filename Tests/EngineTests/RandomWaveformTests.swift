@@ -199,3 +199,54 @@ final class RandomApplicationPointsTests: XCTestCase {
         XCTAssertTrue(shifts.allSatisfy { abs($0) <= cycle.frame.degreesPerOctave })
     }
 }
+
+/// El dibujo de cada onda en la lista de la pantalla (FR14).
+///
+/// **Es un icono, no una predicción.** Las periódicas se dibujan con su propia
+/// forma; `random`, con una escalera fija de ocho peldaños sacada de una
+/// semilla de dibujo. No enseña lo que va a sonar —eso no se sabe—, enseña qué
+/// clase de onda es.
+final class WaveformPreviewTests: XCTestCase {
+
+    /// Las periódicas se dibujan con su valor de siempre.
+    func testPeriodicPreviewsAreTheWaveformItself() {
+        for waveform in Waveform.periodic {
+            for sample in 0..<64 {
+                XCTAssertEqual(
+                    waveform.previewValue(atSample: sample, of: 64),
+                    waveform.value(atStep: sample, of: 64), "\(waveform) \(sample)")
+            }
+        }
+    }
+
+    /// `random` es una escalera de ocho peldaños: plana dentro de cada octavo de
+    /// la vuelta, y la misma en cada dibujo.
+    func testRandomPreviewIsAFixedStaircaseOfEightHolds() {
+        let samples = (0..<64).map { Waveform.random.previewValue(atSample: $0, of: 64) }
+        for hold in 0..<8 {
+            let slice = samples[(hold * 8)..<(hold * 8 + 8)]
+            XCTAssertEqual(Set(slice).count, 1, "peldaño \(hold) no es plano")
+        }
+        XCTAssertEqual(samples, (0..<64).map { Waveform.random.previewValue(atSample: $0, of: 64) })
+    }
+
+    /// **Se lee como aleatoria**: ocho peldaños distintos, que suben y bajan y
+    /// usan buena parte del recorrido. Una escalera monótona se leería como
+    /// `saw`.
+    func testRandomPreviewReadsAsRandom() {
+        let holds = (0..<8).map { Waveform.random.previewValue(atSample: $0 * 8, of: 64) }
+        XCTAssertEqual(Set(holds).count, 8)
+        XCTAssertGreaterThanOrEqual(holds.max()! - holds.min()!, 120)
+        let rises = zip(holds, holds.dropFirst()).filter { $0 < $1 }.count
+        XCTAssertTrue((2...5).contains(rises), "\(holds)")
+    }
+
+    /// El dibujo de dos ciclos repite la escalera: la lista dibuja dos vueltas.
+    func testRandomPreviewWrapsAroundTheTurn() {
+        for sample in 0..<64 {
+            XCTAssertEqual(
+                Waveform.random.previewValue(atSample: sample + 64, of: 64),
+                Waveform.random.previewValue(atSample: sample, of: 64))
+        }
+    }
+}

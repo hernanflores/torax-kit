@@ -75,6 +75,40 @@ extension Waveform {
     /// conoce entera antes de sonar y se dibuja como una línea; `random` no se
     /// conoce hasta que suena, y el panel enseña la banda que puede alcanzar.
     public var isPeriodic: Bool { self != .random }
+
+    /// Cuántos peldaños tiene el dibujo de `random` en una vuelta.
+    static let previewHolds = 8
+
+    /// La semilla del dibujo de `random`.
+    ///
+    /// **Elegida a mano, no derivada.** Con ella los ocho peldaños son
+    /// distintos, suben y bajan, recorren casi todo el rango y ningún salto es
+    /// tan pequeño que se lea como pendiente. Otra semilla podría dar una
+    /// escalera monótona, que se leería como `saw`.
+    static let previewSeed: UInt64 = 12
+
+    /// El valor con el que la lista de ondas dibuja cada una (FR14).
+    ///
+    /// **Es un icono, no una predicción.** Las periódicas se dibujan con su
+    /// propia forma. `random` se dibuja como una escalera fija de ocho
+    /// peldaños: no enseña lo que va a sonar —eso no se sabe hasta que
+    /// suena—, enseña qué clase de onda es.
+    ///
+    /// Vive en `Engine` y no en la vista por la regla de siempre: si algo en
+    /// `App` merece un test, está en el sitio equivocado.
+    ///
+    /// Samples the waveform for its preview drawing.
+    /// - Parameters:
+    ///   - sample: The sample index; it wraps around the turn.
+    ///   - sampleCount: How many samples one turn has.
+    /// - Returns: The value to draw, from −100 to 100.
+    public func previewValue(atSample sample: Int, of sampleCount: Int) -> Int {
+        guard self == .random else { return value(atStep: sample, of: sampleCount) }
+        guard sampleCount > 0 else { return 0 }
+        let wrapped = ((sample % sampleCount) + sampleCount) % sampleCount
+        return SeededRandom.excursion(
+            seed: Self.previewSeed, atStep: wrapped * Self.previewHolds / sampleCount)
+    }
 }
 
 /// Cuánto se desvía la velocity a lo largo de la vuelta, con signo.
