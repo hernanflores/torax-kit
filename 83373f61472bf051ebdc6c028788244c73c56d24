@@ -2,3 +2,8 @@ Task: El icono de random (random-modulation_20261030, Fase 5)
 Cambios: Waveform.previewValue(atSample:of:), previewHolds = 8, previewSeed = 12 (peldaños 20, -84, 22, 85, -78, 96, 24, -97).
 Tests: WaveformPreviewTests (4).
 Por qué: el dibujo es dato de Engine; con la semilla por defecto la escalera no se leía necesariamente como aleatoria.
+
+Checkpoint Fase 5 (random-modulation_20261030)
+Comando: swift test --enable-code-coverage --filter 'EngineTests\.|PersistenceTests\.'
+Resultado: 1215/1215; Engine 98,79% líneas (Modulation.swift 99,04%).
+Verificación manual: no aplica (sin pausa hasta la Fase 8).
