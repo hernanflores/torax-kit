@@ -1,0 +1,4 @@
+Task: El mezclador sin estado (random-modulation_20261030, Fase 2)
+Cambios: SeededRandom.excursion(seed:atStep:) — finalizador SplitMix64 sobre seed^step, mapeado a -100...100. RULES.md §3 admite el aleatorio como función pura de la semilla.
+Ficheros: Sources/Engine/SeededRandom.swift, Tests/EngineTests/RandomExcursionTests.swift (8 tests), RULES.md.
+Por qué: la onda random no puede consumir SeededRandom sin mover las omisiones de Probability; una función pura varía por vuelta y se repite por Play sin estado.
