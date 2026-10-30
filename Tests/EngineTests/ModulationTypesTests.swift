@@ -21,10 +21,19 @@ final class ModulationTypesTests: XCTestCase {
 
     // MARK: - Waveform
 
-    /// Cuatro casos y ninguno más, tal y como los lista la Pre Spec.
-    func testWaveformHasExactlyFourCases() {
-        XCTAssertEqual(Waveform.allCases.count, 4)
-        XCTAssertEqual(Waveform.allCases, [.saw, .triangle, .sine, .pulse])
+    /// Las cuatro de la Pre Spec y `random`, que entra quinta el 2026-10-30
+    /// (Random Modulation, FR1). Ninguna más.
+    func testWaveformHasExactlyFiveCases() {
+        XCTAssertEqual(Waveform.allCases.count, 5)
+        XCTAssertEqual(Waveform.allCases, [.saw, .triangle, .sine, .pulse, .random])
+    }
+
+    /// Las periódicas son las cuatro de siempre: las que dependen solo de la
+    /// posición en la vuelta y que el panel puede dibujar como una línea.
+    func testOnlyRandomIsNotPeriodic() {
+        XCTAssertEqual(Waveform.periodic, [.saw, .triangle, .sine, .pulse])
+        XCTAssertEqual(Waveform.allCases.filter(\.isPeriodic), Waveform.periodic)
+        XCTAssertFalse(Waveform.random.isPeriodic)
     }
 
     /// El default del producto. `triangle` es la forma que sube y baja
@@ -40,6 +49,7 @@ final class ModulationTypesTests: XCTestCase {
         XCTAssertEqual(Waveform.triangle.description, "triangle")
         XCTAssertEqual(Waveform.sine.description, "sine")
         XCTAssertEqual(Waveform.pulse.description, "pulse")
+        XCTAssertEqual(Waveform.random.description, "random")
     }
 
     /// El recorrido de la rejilla 2×2 de la pantalla es el de `allCases`, así
@@ -47,7 +57,7 @@ final class ModulationTypesTests: XCTestCase {
     func testWaveformKeepsTheOrderTheScreenDraws() {
         XCTAssertEqual(
             Waveform.allCases.map(\.description),
-            ["saw", "triangle", "sine", "pulse"]
+            ["saw", "triangle", "sine", "pulse", "random"]
         )
     }
 

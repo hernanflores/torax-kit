@@ -1,0 +1,252 @@
+import XCTest
+
+@testable import Engine
+
+/// Tests de la onda `random` (Random Modulation, FR1–FR4).
+///
+/// **Es la única onda que no sale de la posición en la vuelta.** Las cuatro
+/// periódicas son funciones de `(step, stepCount)`; `random` es una función de
+/// `(Step absoluto, semilla)`, un valor nuevo por Step. Las cuatro reciben los
+/// mismos argumentos y los ignoran, así que no cambian ni un número.
+final class RandomWaveformTests: XCTestCase {
+
+    private let seed: UInt64 = 0xC0FFEE
+
+    /// `random` es exactamente el aleatorio sin estado del Step absoluto.
+    func testRandomIsTheExcursionOfTheAbsoluteStep() {
+        for absolute in 0..<64 {
+            XCTAssertEqual(
+                Waveform.random.value(atStep: absolute % 16, of: 16, absoluteStep: absolute, seed: seed),
+                SeededRandom.excursion(seed: seed, atStep: absolute),
+                "absolute \(absolute)")
+        }
+    }
+
+    /// **Mismo Step de la vuelta, otra vuelta, otro valor.** Lo que decide es el
+    /// Step absoluto, no la posición en el anillo (AC 4).
+    func testTheSameRingPositionDiffersAcrossLaps() {
+        let laps = (0..<4).map { lap in
+            (0..<16).map { step in
+                Waveform.random.value(atStep: step, of: 16, absoluteStep: lap * 16 + step, seed: seed)
+            }
+        }
+        XCTAssertEqual(Set(laps.map { $0.description }).count, 4)
+    }
+
+    /// Sin Step absoluto, `random` usa la posición de la vuelta. Es lo que
+    /// reciben las llamadas que no tienen reloj —el panel, los tests de las
+    /// periódicas— y sigue siendo determinista.
+    func testWithoutAnAbsoluteStepRandomUsesTheRingPosition() {
+        for step in 0..<16 {
+            XCTAssertEqual(
+                Waveform.random.value(atStep: step, of: 16),
+                SeededRandom.excursion(seed: SeededRandom.defaultSeed, atStep: step))
+        }
+    }
+
+    /// **Las cuatro periódicas ignoran el Step absoluto y la semilla** (FR4,
+    /// AC 1): dan, para todo `(step, stepCount)`, lo mismo que sin ellos.
+    func testPeriodicWaveformsIgnoreTheAbsoluteStepAndTheSeed() {
+        for waveform in Waveform.periodic {
+            for stepCount in [1, 7, 16, 64] {
+                for step in 0..<stepCount {
+                    let plain = waveform.value(atStep: step, of: stepCount)
+                    for (absolute, seed) in [(0, UInt64(1)), (999, 42), (step + 160, .max)] {
+                        XCTAssertEqual(
+                            waveform.value(
+                                atStep: step, of: stepCount, absoluteStep: absolute, seed: seed),
+                            plain, "\(waveform) \(step)/\(stepCount)")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Un `stepCount` no positivo no revienta tampoco con `random`: devuelve un
+    /// valor en rango. No puede ocurrir —`Steps` valida 1…64—, pero esto corre
+    /// en el hilo del scheduler.
+    func testRandomWithANonPositiveStepCountStaysInRange() {
+        for stepCount in [0, -4] {
+            let value = Waveform.random.value(atStep: 3, of: stepCount, absoluteStep: 3, seed: seed)
+            XCTAssertTrue((-100...100).contains(value))
+        }
+    }
+
+    /// `Waveform` sigue cabiendo en un byte y `Cycle` sigue siendo trivial:
+    /// el snapshot no crece (NFR2, AC 12).
+    func testAddingRandomKeepsTheSnapshotTrivial() {
+        XCTAssertEqual(MemoryLayout<Waveform>.size, 1)
+        XCTAssertTrue(_isPOD(Cycle.self))
+        XCTAssertTrue(_isPOD(Modulation.self))
+    }
+}
+
+/// `Modulation.offset` con `random` (FR5, FR6, AC 2, AC 8).
+///
+/// **La fórmula de `depth` no cambia**: `random` entra donde entraba la onda, y
+/// el `halfRange` de cada destino, la división que trunca y la excepción de
+/// `pitch` siguen siendo las de siempre.
+final class RandomModulationOffsetTests: XCTestCase {
+
+    private let seed: UInt64 = 0xC0FFEE
+
+    private let targets: [TrackParameter] = [
+        .velocity, .sustain, .timing, .delay, .repeats, .repeatTime, .ramp, .pace, .pitch,
+    ]
+
+    /// Con `depth = 0`, cero en los nueve destinos y en cualquier Step (AC 2).
+    func testZeroDepthIsNeutralOnEveryTarget() {
+        for target in targets {
+            let modulation = Modulation(waveform: .random, depth: .default, target: target)
+            for absolute in 0..<64 {
+                XCTAssertEqual(
+                    modulation.offset(atStep: absolute % 16, of: 16, absoluteStep: absolute, seed: seed),
+                    0, "\(target) \(absolute)")
+            }
+        }
+    }
+
+    /// **Espejo**: misma semilla y mismo Step, `+n` y `−n` dan offsets opuestos
+    /// exactos, porque la división trunca hacia cero (AC 8).
+    func testOppositeDepthsMirrorEachOther() {
+        for target in targets {
+            for percent in [1, 37, 100] {
+                let up = Modulation(waveform: .random, depth: Depth(percent: percent)!, target: target)
+                let down = Modulation(waveform: .random, depth: Depth(percent: -percent)!, target: target)
+                for absolute in 0..<64 {
+                    XCTAssertEqual(
+                        up.offset(atStep: absolute % 16, of: 16, absoluteStep: absolute, seed: seed),
+                        -down.offset(atStep: absolute % 16, of: 16, absoluteStep: absolute, seed: seed),
+                        "\(target) \(percent) \(absolute)")
+                }
+            }
+        }
+    }
+
+    /// El offset es la excursión de `random` pasada por la fórmula de siempre.
+    func testTheOffsetIsTheExcursionThroughTheUsualFormula() {
+        for target in targets {
+            let modulation = Modulation(waveform: .random, depth: Depth(percent: 60)!, target: target)
+            for absolute in 0..<64 {
+                let excursion = SeededRandom.excursion(seed: seed, atStep: absolute)
+                XCTAssertEqual(
+                    modulation.offset(atStep: absolute % 16, of: 16, absoluteStep: absolute, seed: seed),
+                    excursion * 60 * target.modulationHalfRange / 10000,
+                    "\(target) \(absolute)")
+            }
+        }
+    }
+
+    /// `velocity(atStep:…)` lleva el Step absoluto y la semilla hasta la onda.
+    func testVelocityCarriesTheAbsoluteStepAndTheSeed() {
+        let modulation = Modulation(waveform: .random, depth: Depth(percent: 100)!, target: .velocity)
+        let base = Velocity(64)!
+        let lap1 = (0..<16).map {
+            modulation.velocity(atStep: $0, of: 16, absoluteStep: $0, seed: seed, from: base).value
+        }
+        let lap2 = (0..<16).map {
+            modulation.velocity(atStep: $0, of: 16, absoluteStep: 16 + $0, seed: seed, from: base).value
+        }
+        XCTAssertNotEqual(lap1, lap2)
+    }
+}
+
+/// Los tres puntos de aplicación llevan el Step absoluto y la semilla hasta
+/// la onda (FR7). Sin ellos, `random` sonaría igual en cada vuelta.
+final class RandomApplicationPointsTests: XCTestCase {
+
+    private let seed: UInt64 = 0xC0FFEE
+
+    private func modulation(_ target: TrackParameter) -> Modulation {
+        Modulation(waveform: .random, depth: Depth(percent: 100)!, target: target)
+    }
+
+    private func offset(_ target: TrackParameter, _ absolute: Int) -> Int {
+        modulation(target).offset(atStep: absolute % 16, of: 16, absoluteStep: absolute, seed: seed)
+    }
+
+    func testGrooveAppliesTheOffsetOfTheAbsoluteStep() {
+        let groove = Groove(velocity: Velocity(64)!, sustain: Sustain(percent: 50)!, probability: .default)
+        for absolute in [3, 19, 35] {
+            let voiced = groove.modulated(
+                by: modulation(.velocity), atStep: absolute % 16, of: 16,
+                absoluteStep: absolute, seed: seed)
+            XCTAssertEqual(
+                voiced.velocity, groove.velocity.advanced(by: offset(.velocity, absolute)))
+        }
+    }
+
+    func testNoteRepeaterAppliesTheOffsetOfTheAbsoluteStep() {
+        let repeater = NoteRepeater(repeats: Repeats(4)!)
+        for absolute in [3, 19, 35] {
+            let modulated = repeater.modulated(
+                by: modulation(.repeats), atStep: absolute % 16, of: 16,
+                absoluteStep: absolute, seed: seed)
+            XCTAssertEqual(modulated.repeats, repeater.repeats.advanced(by: offset(.repeats, absolute)))
+        }
+    }
+
+    func testPitchShiftUsesTheAbsoluteStep() {
+        var pool = PitchPool()
+        for value in [60, 63, 67] { pool = pool.toggling(Pitch(value)!) }
+        let cycle = Cycle(
+            shape: Shape(steps: Steps(16)!, pulses: Pulses(16)!), pool: pool,
+            modulation: modulation(.pitch))
+        let shifts = (0..<48).map {
+            cycle.modulationPitchShift(atStep: $0 % 16, of: 16, absoluteStep: $0, seed: seed)
+        }
+        XCTAssertNotEqual(Array(shifts[0..<16]), Array(shifts[16..<32]))
+        XCTAssertTrue(shifts.allSatisfy { abs($0) <= cycle.frame.degreesPerOctave })
+    }
+}
+
+/// El dibujo de cada onda en la lista de la pantalla (FR14).
+///
+/// **Es un icono, no una predicción.** Las periódicas se dibujan con su propia
+/// forma; `random`, con una escalera fija de ocho peldaños sacada de una
+/// semilla de dibujo. No enseña lo que va a sonar —eso no se sabe—, enseña qué
+/// clase de onda es.
+final class WaveformPreviewTests: XCTestCase {
+
+    /// Las periódicas se dibujan con su valor de siempre.
+    func testPeriodicPreviewsAreTheWaveformItself() {
+        for waveform in Waveform.periodic {
+            for sample in 0..<64 {
+                XCTAssertEqual(
+                    waveform.previewValue(atSample: sample, of: 64),
+                    waveform.value(atStep: sample, of: 64), "\(waveform) \(sample)")
+            }
+        }
+    }
+
+    /// `random` es una escalera de ocho peldaños: plana dentro de cada octavo de
+    /// la vuelta, y la misma en cada dibujo.
+    func testRandomPreviewIsAFixedStaircaseOfEightHolds() {
+        let samples = (0..<64).map { Waveform.random.previewValue(atSample: $0, of: 64) }
+        for hold in 0..<8 {
+            let slice = samples[(hold * 8)..<(hold * 8 + 8)]
+            XCTAssertEqual(Set(slice).count, 1, "peldaño \(hold) no es plano")
+        }
+        XCTAssertEqual(samples, (0..<64).map { Waveform.random.previewValue(atSample: $0, of: 64) })
+    }
+
+    /// **Se lee como aleatoria**: ocho peldaños distintos, que suben y bajan y
+    /// usan buena parte del recorrido. Una escalera monótona se leería como
+    /// `saw`.
+    func testRandomPreviewReadsAsRandom() {
+        let holds = (0..<8).map { Waveform.random.previewValue(atSample: $0 * 8, of: 64) }
+        XCTAssertEqual(Set(holds).count, 8)
+        XCTAssertGreaterThanOrEqual(holds.max()! - holds.min()!, 120)
+        let rises = zip(holds, holds.dropFirst()).filter { $0 < $1 }.count
+        XCTAssertTrue((2...5).contains(rises), "\(holds)")
+    }
+
+    /// El dibujo de dos ciclos repite la escalera: la lista dibuja dos vueltas.
+    func testRandomPreviewWrapsAroundTheTurn() {
+        for sample in 0..<64 {
+            XCTAssertEqual(
+                Waveform.random.previewValue(atSample: sample + 64, of: 64),
+                Waveform.random.previewValue(atSample: sample, of: 64))
+        }
+    }
+}

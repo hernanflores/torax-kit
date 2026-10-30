@@ -39,9 +39,10 @@ final class WaveformSampleTests: XCTestCase {
     }
 
     /// Con un solo Step la fase es siempre 0 y no se divide por cero: la vuelta
-    /// entera es un Step, así que la modulación no tiene recorrido.
+    /// entera es un Step, así que la modulación no tiene recorrido. Solo las
+    /// periódicas: `random` no sale de la fase.
     func testASingleStepIsAlwaysPhaseZero() {
-        for waveform in Waveform.allCases {
+        for waveform in Waveform.periodic {
             let expected = waveform == .pulse ? 100 : 0
             XCTAssertEqual(waveform.value(atStep: 0, of: 1), expected, "\(waveform)")
         }
@@ -59,9 +60,11 @@ final class WaveformSampleTests: XCTestCase {
 
     /// **El índice envuelve sobre la vuelta**, como `Cycle.triggers(atStep:)`:
     /// el Step 16 de una vuelta de 16 es el Step 0 de la siguiente, y eso es
-    /// exactamente lo que hace que el ciclo dure una vuelta.
+    /// exactamente lo que hace que el ciclo dure una vuelta. Solo las
+    /// periódicas: `random` varía por vuelta a propósito
+    /// (`RandomWaveformTests`).
     func testTheStepIndexWrapsAroundTheTurn() {
-        for waveform in Waveform.allCases {
+        for waveform in Waveform.periodic {
             for step in 0..<16 {
                 XCTAssertEqual(
                     waveform.value(atStep: step + 16, of: 16),

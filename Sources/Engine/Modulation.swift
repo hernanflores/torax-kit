@@ -1,6 +1,8 @@
 /// La forma del movimiento que la modulación imprime a la velocity.
 ///
-/// **Cuatro casos y ninguno más**, tal y como los lista la Pre Spec.
+/// **Las cuatro de la Pre Spec y `random`**, que entra quinta el 2026-10-30
+/// (Random Modulation). Las cuatro primeras son **periódicas** —dependen solo de
+/// la posición en la vuelta—; `random` no.
 ///
 /// > **Se llama `waveform` y no `Groove`.** La Pre Spec usa *Groove* para dos
 /// > cosas —la familia de Velocity, Sustain, Probability, Timing y Delay, y el
@@ -27,6 +29,12 @@ public enum Waveform: CaseIterable, Equatable, Sendable {
     /// Dos valores y nada entre ellos: media vuelta arriba, media abajo.
     case pulse
 
+    /// *Sample & hold*: un valor aleatorio nuevo en cada Step, función pura del
+    /// Step absoluto y la semilla del Track —`SeededRandom.excursion`—. Varía
+    /// por vuelta y se repite por Play, como Probability, sin consumir su
+    /// generador.
+    case random
+
     /// Default del producto.
     ///
     /// **`triangle` y no `saw`** porque es la forma que sube y baja
@@ -50,7 +58,56 @@ extension Waveform: CustomStringConvertible {
         case .triangle: "triangle"
         case .sine: "sine"
         case .pulse: "pulse"
+        case .random: "random"
         }
+    }
+}
+
+extension Waveform {
+
+    /// Las cuatro ondas que salen solo de la posición en la vuelta, en el orden
+    /// de `allCases`.
+    public static let periodic: [Waveform] = [.saw, .triangle, .sine, .pulse]
+
+    /// Si la onda depende solo de la posición en la vuelta.
+    ///
+    /// **Es lo que decide qué puede dibujar el panel.** Una onda periódica se
+    /// conoce entera antes de sonar y se dibuja como una línea; `random` no se
+    /// conoce hasta que suena, y el panel enseña la banda que puede alcanzar.
+    public var isPeriodic: Bool { self != .random }
+
+    /// Cuántos peldaños tiene el dibujo de `random` en una vuelta.
+    static let previewHolds = 8
+
+    /// La semilla del dibujo de `random`.
+    ///
+    /// **Elegida a mano, no derivada.** Con ella los ocho peldaños son
+    /// distintos, suben y bajan, recorren casi todo el rango y ningún salto es
+    /// tan pequeño que se lea como pendiente. Otra semilla podría dar una
+    /// escalera monótona, que se leería como `saw`.
+    static let previewSeed: UInt64 = 12
+
+    /// El valor con el que la lista de ondas dibuja cada una (FR14).
+    ///
+    /// **Es un icono, no una predicción.** Las periódicas se dibujan con su
+    /// propia forma. `random` se dibuja como una escalera fija de ocho
+    /// peldaños: no enseña lo que va a sonar —eso no se sabe hasta que
+    /// suena—, enseña qué clase de onda es.
+    ///
+    /// Vive en `Engine` y no en la vista por la regla de siempre: si algo en
+    /// `App` merece un test, está en el sitio equivocado.
+    ///
+    /// Samples the waveform for its preview drawing.
+    /// - Parameters:
+    ///   - sample: The sample index; it wraps around the turn.
+    ///   - sampleCount: How many samples one turn has.
+    /// - Returns: The value to draw, from −100 to 100.
+    public func previewValue(atSample sample: Int, of sampleCount: Int) -> Int {
+        guard self == .random else { return value(atStep: sample, of: sampleCount) }
+        guard sampleCount > 0 else { return 0 }
+        let wrapped = ((sample % sampleCount) + sampleCount) % sampleCount
+        return SeededRandom.excursion(
+            seed: Self.previewSeed, atStep: wrapped * Self.previewHolds / sampleCount)
     }
 }
 
@@ -201,12 +258,26 @@ extension Waveform {
     /// Realtime: llamado desde el hilo del scheduler.
     /// Sin asignaciones, sin locks, sin await, sin coma flotante.
     ///
+    /// **`random` no sale de la posición sino del Step absoluto y la semilla.**
+    /// Las cuatro periódicas reciben los dos y los ignoran, así que no cambian
+    /// un número. Sin Step absoluto —el panel, que no tiene reloj—, `random`
+    /// usa la posición en la vuelta y la semilla por defecto: determinista, y
+    /// sin pretender ser lo que va a sonar.
+    ///
     /// Samples the modulation waveform at one step of a turn.
     /// - Parameters:
     ///   - step: The step index; it wraps around the turn.
     ///   - stepCount: How many steps the turn has.
+    ///   - absoluteStep: The step counted from Play. Only `random` reads it;
+    ///     `nil` means `step`.
+    ///   - seed: The Track's seed. Only `random` reads it.
     /// - Returns: The excursion, from −100 to 100.
-    public func value(atStep step: Int, of stepCount: Int) -> Int {
+    public func value(
+        atStep step: Int,
+        of stepCount: Int,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed
+    ) -> Int {
         guard stepCount > 0 else { return 0 }
 
         // El módulo de Swift conserva el signo del dividendo, así que un índice
@@ -232,6 +303,9 @@ extension Waveform {
 
         case .pulse:
             return t < 200 ? 100 : -100
+
+        case .random:
+            return SeededRandom.excursion(seed: seed, atStep: absoluteStep ?? step)
         }
     }
 
@@ -428,10 +502,18 @@ extension Modulation {
     /// - Parameters:
     ///   - step: The step index within the turn; it wraps around it.
     ///   - stepCount: How many steps the turn has.
+    ///   - absoluteStep: The step counted from Play. Only `random` reads it.
+    ///   - seed: The Track's seed. Only `random` reads it.
     /// - Returns: The offset in the target parameter's own units.
-    public func offset(atStep step: Int, of stepCount: Int) -> Int {
+    public func offset(
+        atStep step: Int,
+        of stepCount: Int,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed
+    ) -> Int {
         guard depth.percent != 0 else { return 0 }
-        let excursion = waveform.value(atStep: step, of: stepCount)
+        let excursion = waveform.value(
+            atStep: step, of: stepCount, absoluteStep: absoluteStep, seed: seed)
         return excursion * depth.percent * target.modulationHalfRange / 10000
     }
 
@@ -457,9 +539,16 @@ extension Modulation {
     ///   - stepCount: How many steps the turn has.
     ///   - base: The velocity of the cycle.
     /// - Returns: A velocity clamped to `Velocity.validRange`.
-    public func velocity(atStep step: Int, of stepCount: Int, from base: Velocity) -> Velocity {
+    public func velocity(
+        atStep step: Int,
+        of stepCount: Int,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed,
+        from base: Velocity
+    ) -> Velocity {
         guard depth.percent != 0, target == .velocity else { return base }
-        return base.advanced(by: offset(atStep: step, of: stepCount))
+        return base.advanced(
+            by: offset(atStep: step, of: stepCount, absoluteStep: absoluteStep, seed: seed))
     }
 }
 
@@ -497,12 +586,17 @@ extension NoteRepeater {
     ///   - step: The step index within the turn.
     ///   - stepCount: How many steps the turn has.
     /// - Returns: The same note repeater with the target parameter of that step.
-    public func modulated(by modulation: Modulation, atStep step: Int, of stepCount: Int)
-        -> NoteRepeater
-    {
+    public func modulated(
+        by modulation: Modulation,
+        atStep step: Int,
+        of stepCount: Int,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed
+    ) -> NoteRepeater {
         guard modulation.depth.percent != 0 else { return self }
 
-        let offset = modulation.offset(atStep: step, of: stepCount)
+        let offset = modulation.offset(
+            atStep: step, of: stepCount, absoluteStep: absoluteStep, seed: seed)
         switch modulation.target {
         case .repeats: return with(repeats: repeats.advanced(by: offset))
         case .repeatTime: return with(time: time.advanced(by: offset))
@@ -535,13 +629,19 @@ extension Cycle {
     /// `pitchOffsetLimits(harmony:in:)` recorre el pool —ocho entradas como
     /// mucho— con enteros y sin construir nada.
     /// Sin asignaciones, sin locks, sin await, sin coma flotante.
-    public func modulationPitchShift(atStep step: Int, of stepCount: Int) -> Int {
+    public func modulationPitchShift(
+        atStep step: Int,
+        of stepCount: Int,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed
+    ) -> Int {
         guard modulation.depth.percent != 0, modulation.target == .pitch else { return 0 }
 
         // **No pasa por `Modulation.offset(atStep:of:)`**: aquella usa el
         // `halfRange` del `TrackParameter`, y el de pitch depende de la escala.
         // Ver `modulationHalfRange`.
-        let excursion = modulation.waveform.value(atStep: step, of: stepCount)
+        let excursion = modulation.waveform.value(
+            atStep: step, of: stepCount, absoluteStep: absoluteStep, seed: seed)
         let offset = excursion * modulation.depth.percent * modulationHalfRange / 10000
         return pitchOffset(movedBy: offset).degrees - pitchOffset.degrees
     }
@@ -595,11 +695,16 @@ extension Cycle {
     /// la máscara de la escala.
     /// Sin asignaciones, sin locks, sin await, sin coma flotante.
     public func modulatedPitch(
-        atStep index: Int, of stepCount: Int, traversal: PoolTraversal = .ascending
+        atStep index: Int,
+        of stepCount: Int,
+        traversal: PoolTraversal = .ascending,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed
     ) -> Pitch? {
         guard let base = pitch(atStep: index, traversal: traversal) else { return nil }
 
-        let shift = modulationPitchShift(atStep: index, of: stepCount)
+        let shift = modulationPitchShift(
+            atStep: index, of: stepCount, absoluteStep: absoluteStep, seed: seed)
         guard shift != 0 else { return base }
 
         // **La altura se lleva al marco antes de contar grados**, con el mismo
@@ -650,11 +755,17 @@ extension Groove {
     ///   - step: The step index within the turn.
     ///   - stepCount: How many steps the turn has.
     /// - Returns: The same groove with the velocity of that step.
-    public func modulated(by modulation: Modulation, atStep step: Int, of stepCount: Int) -> Groove
-    {
+    public func modulated(
+        by modulation: Modulation,
+        atStep step: Int,
+        of stepCount: Int,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed
+    ) -> Groove {
         guard modulation.depth.percent != 0 else { return self }
 
-        let offset = modulation.offset(atStep: step, of: stepCount)
+        let offset = modulation.offset(
+            atStep: step, of: stepCount, absoluteStep: absoluteStep, seed: seed)
         switch modulation.target {
         case .velocity:
             return Groove(
@@ -724,6 +835,24 @@ public struct ModulationResponseStep: Equatable, Sendable {
 
     /// Si el Step es pulso euclidiano.
     public let triggers: Bool
+
+    /// El valor más bajo que puede sonar en este Step, recorte incluido.
+    ///
+    /// **Con una onda periódica es `value`**: la onda se conoce entera y la
+    /// banda es un punto. Con `random`, `value` es la base y la banda dice entre
+    /// qué dos valores va a caer lo que suene — el siguiente no se sabe hasta
+    /// que suena (Random Modulation, FR12).
+    public let lowest: Int
+
+    /// El valor más alto que puede sonar en este Step, recorte incluido.
+    public let highest: Int
+
+    init(value: Int, triggers: Bool, lowest: Int? = nil, highest: Int? = nil) {
+        self.value = value
+        self.triggers = triggers
+        self.lowest = lowest ?? value
+        self.highest = highest ?? value
+    }
 }
 
 extension Cycle {
@@ -752,10 +881,31 @@ extension Cycle {
     /// - Returns: One entry per step of the cycle, in order.
     public var modulationResponse: [ModulationResponseStep] {
         let stepCount = shape.steps.count
+        guard !modulation.waveform.isPeriodic else {
+            return (0..<stepCount).map { step in
+                ModulationResponseStep(
+                    value: modulationValue(atStep: step, of: stepCount),
+                    triggers: triggers(atStep: step)
+                )
+            }
+        }
+
+        // **Con `random`, los bordes son los de `pulse`.** `pulse` vale +100 en
+        // la primera mitad de la vuelta y −100 en la segunda, que son
+        // exactamente las dos excursiones extremas de `random`. Pasarlas por
+        // el camino de siempre —en una vuelta de dos Steps— da los bordes con
+        // su recorte y con el freno de pitch, sin una segunda fórmula. El
+        // offset crece con la excursión, así que no hay nada fuera de ellos.
+        let neutral = with(modulation: modulation.with(depth: .default))
+        let extremes = with(modulation: modulation.with(waveform: .pulse))
+        let up = extremes.modulationValue(atStep: 0, of: 2)
+        let down = extremes.modulationValue(atStep: 1, of: 2)
         return (0..<stepCount).map { step in
             ModulationResponseStep(
-                value: modulationValue(atStep: step, of: stepCount),
-                triggers: triggers(atStep: step)
+                value: neutral.modulationValue(atStep: step, of: stepCount),
+                triggers: triggers(atStep: step),
+                lowest: min(up, down),
+                highest: max(up, down)
             )
         }
     }

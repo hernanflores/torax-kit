@@ -62,6 +62,8 @@ línea a línea y falla si alguien importa algo prohibido, y comprueba además q
 el target no declare dependencias en el manifiesto.
 
 Las funciones del motor son **deterministas**: para el mismo estado y la misma
-semilla, la misma salida. El aleatorio entra siempre como PRNG sembrado y
-explícito — **nunca `Int.random()` ni `.randomElement()`**, que rompen la
+semilla, la misma salida. El aleatorio entra siempre sembrado y explícito
+—como PRNG (`SeededRandom`) o como función pura de la semilla y el Step
+(`SeededRandom.excursion`), cuando consumir el PRNG movería otra decisión—, y
+**nunca como `Int.random()` ni `.randomElement()`**, que rompen la
 reproducibilidad.

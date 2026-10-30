@@ -157,9 +157,13 @@ public enum SchedulerMaterial: Equatable, Sendable {
     ///
     /// Realtime: llamado desde el hilo del scheduler.
     /// Sin asignaciones, sin locks, sin await.
-    func modulatedPitch(atStep index: Int, of stepCount: Int) -> Pitch? {
+    func modulatedPitch(
+        atStep index: Int, of stepCount: Int, absoluteStep: Int, seed: UInt64
+    ) -> Pitch? {
         switch self {
-        case .cycle(let cycle): cycle.modulatedPitch(atStep: index, of: stepCount)
+        case .cycle(let cycle):
+            cycle.modulatedPitch(
+                atStep: index, of: stepCount, absoluteStep: absoluteStep, seed: seed)
         case .everyStep: Self.measurementPitch
         }
     }
@@ -235,6 +239,15 @@ public struct TrackScheduler {
     /// dos vueltas del anillo no omiten lo mismo.
     private var random: SeededRandom
 
+    /// La semilla con la que se construyó, para la onda `random` de la
+    /// modulación.
+    ///
+    /// **Es constante, no estado.** `random` es una función pura de esta
+    /// semilla y el Step absoluto —`SeededRandom.excursion`—, así que no avanza
+    /// nada y no toca a `random`: poner `random` en un Cycle no mueve ninguna
+    /// omisión de Probability.
+    private let modulationSeed: UInt64
+
     /// El Track vigente, cuando lo hay: es de donde salen los Cycles y cuántos
     /// están activos.
     ///
@@ -287,6 +300,7 @@ public struct TrackScheduler {
         self.material = material
         self.lookAhead = LookAheadScheduler(timeline: timeline, startingAtStep: startingStep)
         self.random = SeededRandom(seed: seed)
+        self.modulationSeed = seed
         self.stepDurationNanoseconds = Int64(timeline.stepDurationNanoseconds)
         self.windowBudgetNanoseconds = material.groove.advanceBudgetNanoseconds(
             forStep: Int64(timeline.stepDurationNanoseconds))
@@ -625,7 +639,8 @@ public struct TrackScheduler {
             // **Con `depth` en 0 devuelve el mismo `Groove`**, sin pasar por la
             // onda ni por el acotado, que es el criterio 1 de la rebanada.
             let voiced = groove.modulated(
-                by: material.modulation, atStep: cycleStep, of: material.stepCount ?? 1)
+                by: material.modulation, atStep: cycleStep, of: material.stepCount ?? 1,
+                absoluteStep: step, seed: modulationSeed)
 
             // **El instante se calcula con el Groove ya modulado, y ese orden es
             // parte de la rebanada del LFO asignable** (FR12). Timing y Delay
@@ -651,7 +666,9 @@ public struct TrackScheduler {
                     step,
                     // **La altura también pasa por el LFO** (FR13). Con
                     // cualquier destino que no sea `pitch` es la de siempre.
-                    material.modulatedPitch(atStep: cycleStep, of: material.stepCount ?? 1),
+                    material.modulatedPitch(
+                        atStep: cycleStep, of: material.stepCount ?? 1,
+                        absoluteStep: step, seed: modulationSeed),
                     voiced,
                     pulseOffset
                 )
@@ -712,7 +729,8 @@ public struct TrackScheduler {
         // preguntar primero por el valor base haría que una vuelta con la base
         // en 0 no repitiera nunca.
         let repeater = material.noteRepeater.modulated(
-            by: material.modulation, atStep: cycleStep, of: material.stepCount ?? 1)
+            by: material.modulation, atStep: cycleStep, of: material.stepCount ?? 1,
+            absoluteStep: step, seed: modulationSeed)
         let count = repeater.repeats.count
         guard count > 0 else { return }
 
@@ -728,7 +746,9 @@ public struct TrackScheduler {
         let base = repeater.time.gapNanoseconds(
             forStep: stepDurationNanoseconds, division: cycle.shape.division)
         // Las repeticiones heredan la altura del Pulse, LFO de pitch incluido.
-        let pitch = cycle.modulatedPitch(atStep: cycleStep, of: cycle.shape.steps.count)
+        let pitch = cycle.modulatedPitch(
+            atStep: cycleStep, of: cycle.shape.steps.count,
+            absoluteStep: step, seed: modulationSeed)
 
         // **Las repeticiones heredan la velocity ya modulada del Pulse.** Ramp
         // recorre las repeticiones de un Pulse y `depth` recorre la vuelta del
@@ -740,7 +760,8 @@ public struct TrackScheduler {
         // La Pre Spec pone a Ramp «relativo a la Velocity general del Track», y
         // la Velocity general de **este Step** es la modulada.
         let groove = cycle.groove.modulated(
-            by: cycle.modulation, atStep: cycleStep, of: cycle.shape.steps.count)
+            by: cycle.modulation, atStep: cycleStep, of: cycle.shape.steps.count,
+            absoluteStep: step, seed: modulationSeed)
 
         var elapsed: Int64 = 0
         for index in 1...count {
