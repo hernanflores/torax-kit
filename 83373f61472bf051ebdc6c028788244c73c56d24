@@ -1,0 +1,4 @@
+Task: El icono de random (random-modulation_20261030, Fase 5)
+Cambios: Waveform.previewValue(atSample:of:), previewHolds = 8, previewSeed = 12 (peldaños 20, -84, 22, 85, -78, 96, 24, -97).
+Tests: WaveformPreviewTests (4).
+Por qué: el dibujo es dato de Engine; con la semilla por defecto la escalera no se leía necesariamente como aleatoria.
