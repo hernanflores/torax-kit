@@ -80,3 +80,73 @@ final class RandomWaveformTests: XCTestCase {
         XCTAssertTrue(_isPOD(Modulation.self))
     }
 }
+
+/// `Modulation.offset` con `random` (FR5, FR6, AC 2, AC 8).
+///
+/// **La fórmula de `depth` no cambia**: `random` entra donde entraba la onda, y
+/// el `halfRange` de cada destino, la división que trunca y la excepción de
+/// `pitch` siguen siendo las de siempre.
+final class RandomModulationOffsetTests: XCTestCase {
+
+    private let seed: UInt64 = 0xC0FFEE
+
+    private let targets: [TrackParameter] = [
+        .velocity, .sustain, .timing, .delay, .repeats, .repeatTime, .ramp, .pace, .pitch,
+    ]
+
+    /// Con `depth = 0`, cero en los nueve destinos y en cualquier Step (AC 2).
+    func testZeroDepthIsNeutralOnEveryTarget() {
+        for target in targets {
+            let modulation = Modulation(waveform: .random, depth: .default, target: target)
+            for absolute in 0..<64 {
+                XCTAssertEqual(
+                    modulation.offset(atStep: absolute % 16, of: 16, absoluteStep: absolute, seed: seed),
+                    0, "\(target) \(absolute)")
+            }
+        }
+    }
+
+    /// **Espejo**: misma semilla y mismo Step, `+n` y `−n` dan offsets opuestos
+    /// exactos, porque la división trunca hacia cero (AC 8).
+    func testOppositeDepthsMirrorEachOther() {
+        for target in targets {
+            for percent in [1, 37, 100] {
+                let up = Modulation(waveform: .random, depth: Depth(percent: percent)!, target: target)
+                let down = Modulation(waveform: .random, depth: Depth(percent: -percent)!, target: target)
+                for absolute in 0..<64 {
+                    XCTAssertEqual(
+                        up.offset(atStep: absolute % 16, of: 16, absoluteStep: absolute, seed: seed),
+                        -down.offset(atStep: absolute % 16, of: 16, absoluteStep: absolute, seed: seed),
+                        "\(target) \(percent) \(absolute)")
+                }
+            }
+        }
+    }
+
+    /// El offset es la excursión de `random` pasada por la fórmula de siempre.
+    func testTheOffsetIsTheExcursionThroughTheUsualFormula() {
+        for target in targets {
+            let modulation = Modulation(waveform: .random, depth: Depth(percent: 60)!, target: target)
+            for absolute in 0..<64 {
+                let excursion = SeededRandom.excursion(seed: seed, atStep: absolute)
+                XCTAssertEqual(
+                    modulation.offset(atStep: absolute % 16, of: 16, absoluteStep: absolute, seed: seed),
+                    excursion * 60 * target.modulationHalfRange / 10000,
+                    "\(target) \(absolute)")
+            }
+        }
+    }
+
+    /// `velocity(atStep:…)` lleva el Step absoluto y la semilla hasta la onda.
+    func testVelocityCarriesTheAbsoluteStepAndTheSeed() {
+        let modulation = Modulation(waveform: .random, depth: Depth(percent: 100)!, target: .velocity)
+        let base = Velocity(64)!
+        let lap1 = (0..<16).map {
+            modulation.velocity(atStep: $0, of: 16, absoluteStep: $0, seed: seed, from: base).value
+        }
+        let lap2 = (0..<16).map {
+            modulation.velocity(atStep: $0, of: 16, absoluteStep: 16 + $0, seed: seed, from: base).value
+        }
+        XCTAssertNotEqual(lap1, lap2)
+    }
+}

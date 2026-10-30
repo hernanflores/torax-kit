@@ -468,10 +468,18 @@ extension Modulation {
     /// - Parameters:
     ///   - step: The step index within the turn; it wraps around it.
     ///   - stepCount: How many steps the turn has.
+    ///   - absoluteStep: The step counted from Play. Only `random` reads it.
+    ///   - seed: The Track's seed. Only `random` reads it.
     /// - Returns: The offset in the target parameter's own units.
-    public func offset(atStep step: Int, of stepCount: Int) -> Int {
+    public func offset(
+        atStep step: Int,
+        of stepCount: Int,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed
+    ) -> Int {
         guard depth.percent != 0 else { return 0 }
-        let excursion = waveform.value(atStep: step, of: stepCount)
+        let excursion = waveform.value(
+            atStep: step, of: stepCount, absoluteStep: absoluteStep, seed: seed)
         return excursion * depth.percent * target.modulationHalfRange / 10000
     }
 
@@ -497,9 +505,16 @@ extension Modulation {
     ///   - stepCount: How many steps the turn has.
     ///   - base: The velocity of the cycle.
     /// - Returns: A velocity clamped to `Velocity.validRange`.
-    public func velocity(atStep step: Int, of stepCount: Int, from base: Velocity) -> Velocity {
+    public func velocity(
+        atStep step: Int,
+        of stepCount: Int,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed,
+        from base: Velocity
+    ) -> Velocity {
         guard depth.percent != 0, target == .velocity else { return base }
-        return base.advanced(by: offset(atStep: step, of: stepCount))
+        return base.advanced(
+            by: offset(atStep: step, of: stepCount, absoluteStep: absoluteStep, seed: seed))
     }
 }
 
