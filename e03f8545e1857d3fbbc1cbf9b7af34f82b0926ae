@@ -1,0 +1,4 @@
+Task: Los tres puntos de aplicación reciben el contexto (random-modulation_20261030, Fase 3)
+Cambios: absoluteStep/seed con default en Groove.modulated, NoteRepeater.modulated, Cycle.modulationPitchShift, Cycle.modulatedPitch.
+Tests: RandomApplicationPointsTests (3).
+Por qué: sin el Step absoluto, random sonaría igual en cada vuelta.
