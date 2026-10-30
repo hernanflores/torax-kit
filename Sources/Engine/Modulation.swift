@@ -552,12 +552,17 @@ extension NoteRepeater {
     ///   - step: The step index within the turn.
     ///   - stepCount: How many steps the turn has.
     /// - Returns: The same note repeater with the target parameter of that step.
-    public func modulated(by modulation: Modulation, atStep step: Int, of stepCount: Int)
-        -> NoteRepeater
-    {
+    public func modulated(
+        by modulation: Modulation,
+        atStep step: Int,
+        of stepCount: Int,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed
+    ) -> NoteRepeater {
         guard modulation.depth.percent != 0 else { return self }
 
-        let offset = modulation.offset(atStep: step, of: stepCount)
+        let offset = modulation.offset(
+            atStep: step, of: stepCount, absoluteStep: absoluteStep, seed: seed)
         switch modulation.target {
         case .repeats: return with(repeats: repeats.advanced(by: offset))
         case .repeatTime: return with(time: time.advanced(by: offset))
@@ -590,13 +595,19 @@ extension Cycle {
     /// `pitchOffsetLimits(harmony:in:)` recorre el pool —ocho entradas como
     /// mucho— con enteros y sin construir nada.
     /// Sin asignaciones, sin locks, sin await, sin coma flotante.
-    public func modulationPitchShift(atStep step: Int, of stepCount: Int) -> Int {
+    public func modulationPitchShift(
+        atStep step: Int,
+        of stepCount: Int,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed
+    ) -> Int {
         guard modulation.depth.percent != 0, modulation.target == .pitch else { return 0 }
 
         // **No pasa por `Modulation.offset(atStep:of:)`**: aquella usa el
         // `halfRange` del `TrackParameter`, y el de pitch depende de la escala.
         // Ver `modulationHalfRange`.
-        let excursion = modulation.waveform.value(atStep: step, of: stepCount)
+        let excursion = modulation.waveform.value(
+            atStep: step, of: stepCount, absoluteStep: absoluteStep, seed: seed)
         let offset = excursion * modulation.depth.percent * modulationHalfRange / 10000
         return pitchOffset(movedBy: offset).degrees - pitchOffset.degrees
     }
@@ -650,11 +661,16 @@ extension Cycle {
     /// la máscara de la escala.
     /// Sin asignaciones, sin locks, sin await, sin coma flotante.
     public func modulatedPitch(
-        atStep index: Int, of stepCount: Int, traversal: PoolTraversal = .ascending
+        atStep index: Int,
+        of stepCount: Int,
+        traversal: PoolTraversal = .ascending,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed
     ) -> Pitch? {
         guard let base = pitch(atStep: index, traversal: traversal) else { return nil }
 
-        let shift = modulationPitchShift(atStep: index, of: stepCount)
+        let shift = modulationPitchShift(
+            atStep: index, of: stepCount, absoluteStep: absoluteStep, seed: seed)
         guard shift != 0 else { return base }
 
         // **La altura se lleva al marco antes de contar grados**, con el mismo
@@ -705,11 +721,17 @@ extension Groove {
     ///   - step: The step index within the turn.
     ///   - stepCount: How many steps the turn has.
     /// - Returns: The same groove with the velocity of that step.
-    public func modulated(by modulation: Modulation, atStep step: Int, of stepCount: Int) -> Groove
-    {
+    public func modulated(
+        by modulation: Modulation,
+        atStep step: Int,
+        of stepCount: Int,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed
+    ) -> Groove {
         guard modulation.depth.percent != 0 else { return self }
 
-        let offset = modulation.offset(atStep: step, of: stepCount)
+        let offset = modulation.offset(
+            atStep: step, of: stepCount, absoluteStep: absoluteStep, seed: seed)
         switch modulation.target {
         case .velocity:
             return Groove(

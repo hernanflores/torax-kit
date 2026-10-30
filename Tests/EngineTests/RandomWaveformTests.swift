@@ -150,3 +150,52 @@ final class RandomModulationOffsetTests: XCTestCase {
         XCTAssertNotEqual(lap1, lap2)
     }
 }
+
+/// Los tres puntos de aplicación llevan el Step absoluto y la semilla hasta
+/// la onda (FR7). Sin ellos, `random` sonaría igual en cada vuelta.
+final class RandomApplicationPointsTests: XCTestCase {
+
+    private let seed: UInt64 = 0xC0FFEE
+
+    private func modulation(_ target: TrackParameter) -> Modulation {
+        Modulation(waveform: .random, depth: Depth(percent: 100)!, target: target)
+    }
+
+    private func offset(_ target: TrackParameter, _ absolute: Int) -> Int {
+        modulation(target).offset(atStep: absolute % 16, of: 16, absoluteStep: absolute, seed: seed)
+    }
+
+    func testGrooveAppliesTheOffsetOfTheAbsoluteStep() {
+        let groove = Groove(velocity: Velocity(64)!, sustain: Sustain(percent: 50)!, probability: .default)
+        for absolute in [3, 19, 35] {
+            let voiced = groove.modulated(
+                by: modulation(.velocity), atStep: absolute % 16, of: 16,
+                absoluteStep: absolute, seed: seed)
+            XCTAssertEqual(
+                voiced.velocity, groove.velocity.advanced(by: offset(.velocity, absolute)))
+        }
+    }
+
+    func testNoteRepeaterAppliesTheOffsetOfTheAbsoluteStep() {
+        let repeater = NoteRepeater(repeats: Repeats(4)!)
+        for absolute in [3, 19, 35] {
+            let modulated = repeater.modulated(
+                by: modulation(.repeats), atStep: absolute % 16, of: 16,
+                absoluteStep: absolute, seed: seed)
+            XCTAssertEqual(modulated.repeats, repeater.repeats.advanced(by: offset(.repeats, absolute)))
+        }
+    }
+
+    func testPitchShiftUsesTheAbsoluteStep() {
+        var pool = PitchPool()
+        for value in [60, 63, 67] { pool = pool.toggling(Pitch(value)!) }
+        let cycle = Cycle(
+            shape: Shape(steps: Steps(16)!, pulses: Pulses(16)!), pool: pool,
+            modulation: modulation(.pitch))
+        let shifts = (0..<48).map {
+            cycle.modulationPitchShift(atStep: $0 % 16, of: 16, absoluteStep: $0, seed: seed)
+        }
+        XCTAssertNotEqual(Array(shifts[0..<16]), Array(shifts[16..<32]))
+        XCTAssertTrue(shifts.allSatisfy { abs($0) <= cycle.frame.degreesPerOctave })
+    }
+}
