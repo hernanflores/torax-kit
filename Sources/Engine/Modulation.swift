@@ -1,6 +1,8 @@
 /// La forma del movimiento que la modulación imprime a la velocity.
 ///
-/// **Cuatro casos y ninguno más**, tal y como los lista la Pre Spec.
+/// **Las cuatro de la Pre Spec y `random`**, que entra quinta el 2026-10-30
+/// (Random Modulation). Las cuatro primeras son **periódicas** —dependen solo de
+/// la posición en la vuelta—; `random` no.
 ///
 /// > **Se llama `waveform` y no `Groove`.** La Pre Spec usa *Groove* para dos
 /// > cosas —la familia de Velocity, Sustain, Probability, Timing y Delay, y el
@@ -27,6 +29,12 @@ public enum Waveform: CaseIterable, Equatable, Sendable {
     /// Dos valores y nada entre ellos: media vuelta arriba, media abajo.
     case pulse
 
+    /// *Sample & hold*: un valor aleatorio nuevo en cada Step, función pura del
+    /// Step absoluto y la semilla del Track —`SeededRandom.excursion`—. Varía
+    /// por vuelta y se repite por Play, como Probability, sin consumir su
+    /// generador.
+    case random
+
     /// Default del producto.
     ///
     /// **`triangle` y no `saw`** porque es la forma que sube y baja
@@ -50,8 +58,23 @@ extension Waveform: CustomStringConvertible {
         case .triangle: "triangle"
         case .sine: "sine"
         case .pulse: "pulse"
+        case .random: "random"
         }
     }
+}
+
+extension Waveform {
+
+    /// Las cuatro ondas que salen solo de la posición en la vuelta, en el orden
+    /// de `allCases`.
+    public static let periodic: [Waveform] = [.saw, .triangle, .sine, .pulse]
+
+    /// Si la onda depende solo de la posición en la vuelta.
+    ///
+    /// **Es lo que decide qué puede dibujar el panel.** Una onda periódica se
+    /// conoce entera antes de sonar y se dibuja como una línea; `random` no se
+    /// conoce hasta que suena, y el panel enseña la banda que puede alcanzar.
+    public var isPeriodic: Bool { self != .random }
 }
 
 /// Cuánto se desvía la velocity a lo largo de la vuelta, con signo.
@@ -201,12 +224,26 @@ extension Waveform {
     /// Realtime: llamado desde el hilo del scheduler.
     /// Sin asignaciones, sin locks, sin await, sin coma flotante.
     ///
+    /// **`random` no sale de la posición sino del Step absoluto y la semilla.**
+    /// Las cuatro periódicas reciben los dos y los ignoran, así que no cambian
+    /// un número. Sin Step absoluto —el panel, que no tiene reloj—, `random`
+    /// usa la posición en la vuelta y la semilla por defecto: determinista, y
+    /// sin pretender ser lo que va a sonar.
+    ///
     /// Samples the modulation waveform at one step of a turn.
     /// - Parameters:
     ///   - step: The step index; it wraps around the turn.
     ///   - stepCount: How many steps the turn has.
+    ///   - absoluteStep: The step counted from Play. Only `random` reads it;
+    ///     `nil` means `step`.
+    ///   - seed: The Track's seed. Only `random` reads it.
     /// - Returns: The excursion, from −100 to 100.
-    public func value(atStep step: Int, of stepCount: Int) -> Int {
+    public func value(
+        atStep step: Int,
+        of stepCount: Int,
+        absoluteStep: Int? = nil,
+        seed: UInt64 = SeededRandom.defaultSeed
+    ) -> Int {
         guard stepCount > 0 else { return 0 }
 
         // El módulo de Swift conserva el signo del dividendo, así que un índice
@@ -232,6 +269,9 @@ extension Waveform {
 
         case .pulse:
             return t < 200 ? 100 : -100
+
+        case .random:
+            return SeededRandom.excursion(seed: seed, atStep: absoluteStep ?? step)
         }
     }
 

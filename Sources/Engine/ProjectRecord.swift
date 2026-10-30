@@ -318,6 +318,7 @@ public struct CycleRecord: Codable, Equatable, Sendable {
         case .triangle: "triangle"
         case .sine: "sine"
         case .pulse: "pulse"
+        case .random: "random"
         }
     }
 

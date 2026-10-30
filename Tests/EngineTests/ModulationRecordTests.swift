@@ -69,7 +69,7 @@ final class ModulationRecordTests: XCTestCase {
             let key = try XCTUnwrap(dictionary(from: CycleRecord(cycle))["waveform"] as? String)
             keys.insert(key)
         }
-        XCTAssertEqual(keys, ["saw", "triangle", "sine", "pulse"])
+        XCTAssertEqual(keys, ["saw", "triangle", "sine", "pulse", "random"])
     }
 
     // MARK: - Vuelve entera
