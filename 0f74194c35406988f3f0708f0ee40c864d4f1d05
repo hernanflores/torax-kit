@@ -1,0 +1,4 @@
+Task: Waveform.random (random-modulation_20261030, Fase 2)
+Cambios: case random, Waveform.periodic/isPeriodic, value(atStep:of:absoluteStep:seed:) con defaults; clave de disco "random" (forzada por el switch exhaustivo).
+Tests: RandomWaveformTests (6), ModulationTypesTests actualizado a cinco; WaveformSampleTests (2 tests de fase) recorren Waveform.periodic; ModulationRecordTests incluye "random". Engine 1134/1134.
+Por qué: random no sale de la fase sino del Step absoluto, así que las propiedades de fase son solo de las periódicas.
