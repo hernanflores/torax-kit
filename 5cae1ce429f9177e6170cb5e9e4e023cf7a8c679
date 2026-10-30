@@ -1,0 +1,4 @@
+Task: modulationResponse da la banda (random-modulation_20261030, Fase 5)
+Cambios: ModulationResponseStep.lowest/highest (init interno con default = value); Cycle.modulationResponse calcula la banda de random con los extremos de pulse.
+Tests: RandomResponseTests (6): banda de un punto en las periódicas, la banda contiene lo emitido (9 destinos x 4 depths x 2 semillas x 128 Steps), bordes alcanzados, value = base, velocity 1...127, repeats 0...8. ModulationResponseTests intacto.
+Por qué: el panel no conoce el Step absoluto; dibujar una vuelta concreta mentiría. API pública nueva: cuenta para el 2.0.0.
